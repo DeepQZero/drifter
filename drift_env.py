@@ -96,8 +96,8 @@ class SpaceCraftDockingEnv3D(gym.Env):
         out_of_bounds = self.is_out_of_bounds()
         term = docked or crashed or out_of_bounds or out_of_fuel
         trunc = False if term else out_of_time
-        if docked:
-            print("WIN!")
+        # if docked:
+        #     print("WIN!")
         if self.reward_structure == "sparse":
             tot_step_rew = 1 if docked else 0
 
@@ -169,3 +169,49 @@ class SpaceCraftDockingEnv3D(gym.Env):
                       [0, 0, 1 / self.m]])
 
         return A.dot(x) + B.dot(u)
+
+def det_drift(env):
+    new_env = copy.deepcopy(env)
+    for _ in range(50):  # TODO create hyperparameter
+        drift_action = np.array([0.0, 0.0, 0.0])
+        obs, rew, term, trunc, info = new_env.step(drift_action)
+        if term or trunc:
+            if new_env.is_docked():
+                return True
+            else:
+                return False
+    return False
+
+
+class DriftEnv(gym.Env):
+    def __init__(self):
+        self.env = SpaceCraftDockingEnv3D()
+        self.observation_space = self.env.observation_space
+        self.action_space = self.env.action_space
+
+    def reset(self, seed=None, options=None):
+        return self.env.reset()
+
+    def step(self, act):
+        obs, rew, term, trunc, info = self.env.step(act)
+        if self.env.is_docked():
+            print('WIN!')
+        if not term or trunc:
+            if self.det_drift():
+                print('DRIFTED!')
+                rew += 10
+                term = True
+        return obs, rew, term, trunc, info
+
+
+    def det_drift(self):
+        new_env = copy.deepcopy(self.env)
+        for _ in range(50):  # TODO create hyperparameter
+            drift_action = np.array([0.0, 0.0, 0.0])
+            obs, rew, term, trunc, info = new_env.step(drift_action)
+            if term or trunc:
+                if new_env.is_docked():
+                    return True
+                else:
+                    return False
+        return False
