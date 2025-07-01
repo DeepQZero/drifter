@@ -5,8 +5,7 @@ from stable_baselines3 import PPO
 import numpy as np
 
 model = PPO.load(
-    "../data/ppo_logs/forward/models_docking/checkpoints"
-    "/ppo_model_trial2_200000_steps.zip")
+    "data/ppo_logs/forward/models_docking/checkpoints/ppo_model_trial3_100000_steps.zip")
 
 env = DriftEnv()
 win_count = 0
