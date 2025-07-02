@@ -11,19 +11,21 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def __init__(self,
                  fixed_start=False,
                  reward_structure="dense",
-                 max_episode_len=50,
-                 max_boundary_box=75,
+                 max_episode_len=10,
+                 max_lookahead_len=300,
+                 max_boundary_box=175,
                  max_control=1,
                  max_total_dv=2_500,
-                 pos_thresh=5,
-                 speed_thresh=0.5,
-                 min_init_pos_bound=5,
-                 max_init_pos_bound=25,
-                 max_init_vel_bound=0.3,
+                 pos_thresh=10,
+                 speed_thresh=1,
+                 min_init_pos_bound=10,
+                 max_init_pos_bound=150,
+                 max_init_vel_bound=0.1,
                  fixed_state=np.array([100, 0, 0, 0, 0, 0]),
                  step_len = 1,
                  fuel_used=None,
                  time_step=None):
+        self.lookahead_len = max_lookahead_len
         self.fixed_start = fixed_start
         self.fixed_state = fixed_state
         self.abs_min_init_dist = min_init_pos_bound
@@ -43,13 +45,13 @@ class SpaceCraftDockingEnv3D(gym.Env):
         self.proximity_penalty_coeff = -0.0005
         self.min_vel_penalty_coeff = -0.0075
         self.action_space = spaces.Box(
-            low=np.array([-self.u_max, -self.u_max, -self.u_max]),
-            high=np.array([self.u_max, self.u_max, self.u_max]))
+            low=np.array([-self.u_max]*3),
+            high=np.array([self.u_max]*3)
+        )
         self.observation_space = spaces.Box(
-            low=np.array([-self.max_boundary_box, -self.max_boundary_box,
-                          -self.max_boundary_box, -10.0, -10.0, -10.0]),
-            high=np.array([self.max_boundary_box, self.max_boundary_box,
-                           self.max_boundary_box, 10.0, 10.0, 10.0]))
+            low=np.array([-np.inf]*6),
+            high=np.array([np.inf]*6)
+        )
         self.state = None
         self.fuel_used = fuel_used
         self.time_step = time_step
@@ -64,6 +66,8 @@ class SpaceCraftDockingEnv3D(gym.Env):
             self.state = self.sample_state_space()
         self.fuel_used = 0
         self.time_step = 0
+        self.lookahead_len = int(2*np.linalg.norm(self.state[0:3])) # TODO
+        self.max_boundary_box = int(np.linalg.norm(self.state[0:3])*1.2) # TODO
         return self.state, info
 
     def sample_state_space(self):
@@ -80,7 +84,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
     def step(self, action):
         old_state = np.copy(self.state)
-        self.time_step += self.step_len
+        self.time_step += 1
         self.state = self.propagate(action)
         self.fuel_used += vec_norm(action)
         reward, terminated, truncated = self.rewards(old_state)
@@ -170,18 +174,6 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
         return A.dot(x) + B.dot(u)
 
-def det_drift(env):
-    new_env = copy.deepcopy(env)
-    for _ in range(50):  # TODO create hyperparameter
-        drift_action = np.array([0.0, 0.0, 0.0])
-        obs, rew, term, trunc, info = new_env.step(drift_action)
-        if term or trunc:
-            if new_env.is_docked():
-                return True
-            else:
-                return False
-    return False
-
 
 class DriftEnv(gym.Env):
     def __init__(self):
@@ -206,12 +198,11 @@ class DriftEnv(gym.Env):
 
     def det_drift(self):
         new_env = copy.deepcopy(self.env)
-        for _ in range(50):  # TODO create hyperparameter
+        for j in range(self.env.lookahead_len):  # TODO create hyperparameter
             drift_action = np.array([0.0, 0.0, 0.0])
             obs, rew, term, trunc, info = new_env.step(drift_action)
-            if term or trunc:
-                if new_env.is_docked():
-                    return True
-                else:
-                    return False
+            if term:
+                return new_env.is_docked()
+            elif new_env.time_step >= new_env.lookahead_len:
+                return False
         return False
