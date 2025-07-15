@@ -1,4 +1,4 @@
-from drift_env import DriftEnv as TheEnvironment
+from docking_env import SpaceCraftDockingEnv3D as TheEnvironment
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
@@ -6,12 +6,12 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 
 def rl_train():
     env = TheEnvironment()
-    eval_callback = CheckpointCallback(save_freq=25_000,
+    eval_callback = CheckpointCallback(save_freq=100_000,
                                        save_path='data/ppo_logs/forward/models_docking/checkpoints',
-                                       name_prefix='ppo_150m_0_1ms')
+                                       name_prefix='ppo_docking2')
     model = PPO.load(
         "data/ppo_logs/forward/models_docking/checkpoints"
-        "/ppo_100m_0_1ms_250000_steps.zip",
+        "/ppo_docking_1000000_steps.zip",
         env=env,
         verbose=1)
     # model = PPO("MlpPolicy", env, verbose=1)
