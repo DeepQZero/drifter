@@ -11,13 +11,13 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def __init__(self,
                  fixed_start=False,
                  reward_structure="dense",
-                 max_episode_len=10,
+                 max_episode_len=5,
                  max_lookahead_len=300,
                  max_boundary_box=175,
                  max_control=1,
                  max_total_dv=2_500,
-                 pos_thresh=10,
-                 speed_thresh=1,
+                 pos_thresh=10.0,
+                 speed_thresh=1.0,
                  min_init_pos_bound=10,
                  max_init_pos_bound=150,
                  max_init_vel_bound=0.1,
@@ -66,8 +66,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
             self.state = self.sample_state_space()
         self.fuel_used = 0
         self.time_step = 0
-        self.lookahead_len = int(2*np.linalg.norm(self.state[0:3])) # TODO
-        self.max_boundary_box = int(np.linalg.norm(self.state[0:3])*1.2) # TODO
+        # self.lookahead_len = int(2*np.linalg.norm(self.state[0:3]))+5 # TODO
+        # self.max_boundary_box = int(np.linalg.norm(self.state[0:3])*1.2)+2 #
+        # TODO
         return self.state, info
 
     def sample_state_space(self):
@@ -176,8 +177,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
 
 class DriftEnv(gym.Env):
-    def __init__(self):
-        self.env = SpaceCraftDockingEnv3D()
+    def __init__(self, **kwargs):
+        self.env = SpaceCraftDockingEnv3D(
+            **kwargs)
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
 
@@ -194,7 +196,6 @@ class DriftEnv(gym.Env):
                 rew += 10
                 term = True
         return obs, rew, term, trunc, info
-
 
     def det_drift(self):
         new_env = copy.deepcopy(self.env)

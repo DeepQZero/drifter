@@ -5,10 +5,12 @@ from stable_baselines3 import PPO
 import numpy as np
 
 model = PPO.load(
-    "data/ppo_logs/forward/models_docking/checkpoints"
-    "/ppo_150m_0_1ms_25000_steps.zip")
+    "data/checkpoints/ppo_1m_200000_steps.zip")
 
-env = DriftEnv()
+env = DriftEnv(
+    min_init_pos_bound=0.5,
+    max_init_pos_bound=1
+)
 win_count = 0
 episode_time_steps = []
 fuels = []
