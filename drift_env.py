@@ -127,8 +127,8 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
             tot_step_rew += (prox_penalty + self.time_penalty)
 
-            term = term or (vel_penalty > 0)  # TODO put in sparse
-            if vel_penalty > 0:
+            term = term or (max(current_speed - speed_limit, 0) > 0)  # TODO put in sparse
+            if max(current_speed - speed_limit, 0) > 0:
                 print("UNSAFE!")
 
         return tot_step_rew, term, trunc
