@@ -125,7 +125,11 @@ class SpaceCraftDockingEnv3D(gym.Env):
             prox_penalty = (self.proximity_penalty_coeff *
                             (current_distance - prev_distance))
 
-            tot_step_rew += (vel_penalty + prox_penalty + self.time_penalty)
+            tot_step_rew += (prox_penalty + self.time_penalty)
+
+            term = term or (vel_penalty > 0)  # TODO put in sparse
+            if vel_penalty > 0:
+                print("UNSAFE!")
 
         return tot_step_rew, term, trunc
 
@@ -191,19 +195,22 @@ class DriftEnv(gym.Env):
         if self.env.is_docked():
             print('WIN!')
         if not term or trunc:
-            if self.det_drift():
-                print('DRIFTED!')
+            is_drift, the_time = self.det_drift()
+            if is_drift:
+                print('DRIFTED! ', the_time)
                 rew += 10
                 term = True
         return obs, rew, term, trunc, info
 
     def det_drift(self):
         new_env = copy.deepcopy(self.env)
+        t = 0
         for j in range(self.env.lookahead_len):  # TODO create hyperparameter
             drift_action = np.array([0.0, 0.0, 0.0])
+            t += 1
             obs, rew, term, trunc, info = new_env.step(drift_action)
             if term:
-                return new_env.is_docked()
+                return new_env.is_docked(), t
             elif new_env.time_step >= new_env.lookahead_len:
-                return False
-        return False
+                return False, t
+        return False, t

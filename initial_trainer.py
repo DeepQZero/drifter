@@ -7,7 +7,7 @@ import numpy as np
 from stable_baselines3 import PPO
 
 def curriculum_learn(model_id: int):
-    for curr in range(4, 5):
+    for curr in range(5):
         print('Starting Curriculum: ', curr)
         configs, train_time = get_curriculum(curr)
         env = DriftEnv(**configs)
@@ -65,51 +65,51 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         'max_boundary_box' : 3,
         'max_control' : 1,
         'max_total_dv' : 1000,
-        'pos_thresh' : 0.5,
-        'speed_thresh' : 0.2,
-        'min_init_pos_bound' : 0.5,
-        'max_init_pos_bound' : 1,
+        'pos_thresh' : 1,
+        'speed_thresh' : 1,
+        'min_init_pos_bound' : 1,
+        'max_init_pos_bound' : 2,
         'max_init_vel_bound' : 0.1,
         'fixed_state' : np.array([100, 0, 0, 0, 0, 0]),  # TODO Fix
         'step_len' : 1,
         'fuel_used' : None,
         'time_step' : None
     }
-    train_time = 50_000
+    train_time = 25_000
     if curriculum >= 0:
-        configs['max_episode_len'] = 10
+        configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 10
         configs['max_boundary_box'] = 3
-        configs['min_init_pos_bound'] = 0.5
-        configs['max_init_pos_bound'] = 1
+        configs['min_init_pos_bound'] = 1
+        configs['max_init_pos_bound'] = 2
         configs['max_init_vel_bound'] = 0.1
     if curriculum >= 1:
-        configs['max_episode_len'] = 10
-        configs['max_lookahead_len'] = 25
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 15
         configs['max_boundary_box'] = 10
-        configs['min_init_pos_bound'] = 0.5
-        configs['max_init_pos_bound'] = 2.5
+        configs['min_init_pos_bound'] = 1
+        configs['max_init_pos_bound'] = 3
         configs['max_init_vel_bound'] = 0.1
     if curriculum >= 2:
-        configs['max_episode_len'] = 10
-        configs['max_lookahead_len'] = 35
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 20
         configs['max_boundary_box'] = 10
-        configs['min_init_pos_bound'] = 0.5
-        configs['max_init_pos_bound'] = 3.5
+        configs['min_init_pos_bound'] = 1
+        configs['max_init_pos_bound'] = 5
         configs['max_init_vel_bound'] = 0.1
     if curriculum >= 3:
-        configs['max_episode_len'] = 10
-        configs['max_lookahead_len'] = 50
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 25
         configs['max_boundary_box'] = 20
-        configs['min_init_pos_bound'] = 0.5
-        configs['max_init_pos_bound'] = 3.5
+        configs['min_init_pos_bound'] = 1
+        configs['max_init_pos_bound'] = 7.5
         configs['max_init_vel_bound'] = 0.1
     if curriculum >= 4:
-        configs['max_episode_len'] = 10
-        configs['max_lookahead_len'] = 50
-        configs['max_boundary_box'] = 10
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 40
+        configs['max_boundary_box'] = 30
         configs['min_init_pos_bound'] = 0.5
-        configs['max_init_pos_bound'] = 5
+        configs['max_init_pos_bound'] = 10
         configs['max_init_vel_bound'] = 0.1
     return configs, train_time
 
