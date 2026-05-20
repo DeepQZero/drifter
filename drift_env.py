@@ -24,7 +24,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
                  fixed_state=np.array([100, 0, 0, 0, 0, 0]),
                  step_len = 1,
                  fuel_used=None,
-                 time_step=None):
+                 time_step=None,
+                 drift_step_len=1
+                 ):
         self.lookahead_len = max_lookahead_len
         self.fixed_start = fixed_start
         self.fixed_state = fixed_state
@@ -55,6 +57,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
         self.state = None
         self.fuel_used = fuel_used
         self.time_step = time_step
+        self.drift_step_len = drift_step_len
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -83,10 +86,10 @@ class SpaceCraftDockingEnv3D(gym.Env):
             return self.sample_state_space()
         return sampled_state
 
-    def step(self, action):
+    def step(self, action, drift=False):
         old_state = np.copy(self.state)
         self.time_step += 1
-        self.state = self.propagate(action)
+        self.state = self.propagate(action, drift)
         self.fuel_used += vec_norm(action)
         reward, terminated, truncated = self.rewards(old_state)
         info = {}
@@ -153,8 +156,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def is_out_of_time(self):
         return self.time_step >= self.max_episode_len
 
-    def propagate(self, action):
-        t_span = (self.time_step, self.time_step + self.step_len)
+    def propagate(self, action, drift=False):
+        step_len = self.step_len if not drift else self.drift_step_len
+        t_span = (self.time_step, self.time_step + step_len)
         result = solve_ivp(self.dynamics, t_span, self.state,
                            args=(action,), method='RK45')
         time_points, state_vectors = result.t, result.y
@@ -208,7 +212,7 @@ class DriftEnv(gym.Env):
         for j in range(self.env.lookahead_len):  # TODO create hyperparameter
             drift_action = np.array([0.0, 0.0, 0.0])
             t += 1
-            obs, rew, term, trunc, info = new_env.step(drift_action)
+            obs, rew, term, trunc, info = new_env.step(drift_action, True)
             if term:
                 return new_env.is_docked(), t
             elif new_env.time_step >= new_env.lookahead_len:

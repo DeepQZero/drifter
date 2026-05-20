@@ -3,6 +3,7 @@ from drift_env import DriftEnv
 from stable_baselines3 import PPO
 
 import numpy as np
+from initial_trainer import
 
 model = PPO.load(
     "data/checkpoints/ppo_1m_200000_steps.zip")

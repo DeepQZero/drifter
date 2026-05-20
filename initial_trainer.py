@@ -7,7 +7,7 @@ import numpy as np
 from stable_baselines3 import PPO
 
 def curriculum_learn(model_id: int):
-    for curr in range(5):
+    for curr in range(9, 10):
         print('Starting Curriculum: ', curr)
         configs, train_time = get_curriculum(curr)
         env = DriftEnv(**configs)
@@ -44,10 +44,14 @@ def test_model(path, curriculum):
             epi_fuel += np.linalg.norm(action)
             done = term or trunc
             if done:
-                if env.env.is_docked() or env.det_drift():
+                if env.env.is_docked():
                     all_docks.append(1)
                 else:
-                    all_docks.append(0)
+                    is_drift, t_t = env.det_drift()
+                    if is_drift:
+                        all_docks.append(1)
+                    else:
+                        all_docks.append(0)
                 all_rews.append(epi_reward)
                 all_fuels.append(epi_fuel)
     print('Model Stats for Curriculum: ', curriculum)
@@ -67,18 +71,21 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         'max_boundary_box' : 3,
         'max_control' : 1,
         'max_total_dv' : 1000,
-        'pos_thresh' : 1,
-        'speed_thresh' : 1,
+        'pos_thresh' : 0.5, # TODO was originally at 1
+        'speed_thresh' : 0.2,
         'min_init_pos_bound' : 1,
         'max_init_pos_bound' : 2,
         'max_init_vel_bound' : 0.1,
         'fixed_state' : np.array([100, 0, 0, 0, 0, 0]),  # TODO Fix
         'step_len' : 1,
         'fuel_used' : None,
-        'time_step' : None
+        'time_step' : None,
+        'drift_step_len' : 1
     }
     train_time = 50_000
     if curriculum >= 0:
+        configs['pos_thresh'] = 1
+        configs['speed_thresh'] = 1
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 20
         configs['max_boundary_box'] = 3
@@ -113,8 +120,63 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['min_init_pos_bound'] = 0.5
         configs['max_init_pos_bound'] = 10
         configs['max_init_vel_bound'] = 0.1
+    # if curriculum >= 5:
+    #     configs['pos_thresh'] = 0.5
+    #     configs['speed_thresh'] = 0.2
+    if curriculum >= 5:
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 20
+        configs['max_boundary_box'] = 50
+        configs['min_init_pos_bound'] = 10
+        configs['max_init_pos_bound'] = 20
+        configs['max_init_vel_bound'] = 0.1
+        configs['drift_step_len'] = 10
+        configs['pos_thresh'] = 10
+        configs['speed_thresh'] = 0.2
+    if curriculum >= 6:
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 20
+        configs['max_boundary_box'] = 40
+        configs['min_init_pos_bound'] = 10
+        configs['max_init_pos_bound'] = 35
+        configs['max_init_vel_bound'] = 0.1
+        configs['drift_step_len'] = 10
+        configs['pos_thresh'] = 10
+        configs['speed_thresh'] = 0.2
+    if curriculum >= 7:
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 30
+        configs['max_boundary_box'] = 55
+        configs['min_init_pos_bound'] = 10
+        configs['max_init_pos_bound'] = 50
+        configs['max_init_vel_bound'] = 0.1
+        configs['drift_step_len'] = 10
+        configs['pos_thresh'] = 10
+        configs['speed_thresh'] = 0.2
+    if curriculum >= 8:
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 40
+        configs['max_boundary_box'] = 80
+        configs['min_init_pos_bound'] = 10
+        configs['max_init_pos_bound'] = 75
+        configs['max_init_vel_bound'] = 0.1
+        configs['drift_step_len'] = 10
+        configs['pos_thresh'] = 10
+        configs['speed_thresh'] = 0.2
+    if curriculum >= 9:
+        configs['max_episode_len'] = 5
+        configs['max_lookahead_len'] = 60
+        configs['max_boundary_box'] = 110
+        configs['min_init_pos_bound'] = 10
+        configs['max_init_pos_bound'] = 100
+        configs['max_init_vel_bound'] = 0.1
+        configs['drift_step_len'] = 10
+        configs['pos_thresh'] = 10
+        configs['speed_thresh'] = 0.2
+
     return configs, train_time
 
 if __name__ == "__main__":
-    model_id = 1
-    curriculum_learn(model_id)
+    # model_id = 1
+    # curriculum_learn(model_id)
+    test_model('data/checkpoints/safe_ppo_model_4_1.zip', 4)
