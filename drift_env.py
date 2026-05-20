@@ -218,3 +218,39 @@ class DriftEnv(gym.Env):
             elif new_env.time_step >= new_env.lookahead_len:
                 return False, t
         return False, t
+
+
+class DriftEnv2(gym.Env):
+    def __init__(self, **kwargs):
+        self.env = SpaceCraftDockingEnv3D(
+            **kwargs)
+        self.observation_space = self.env.observation_space
+        self.action_space = self.env.action_space
+        self.is_drifting = False
+
+    def reset(self, seed=None, options=None):
+        return self.env.reset()
+
+    def step(self, act):
+        obs, rew, term, trunc, info = self.env.step(act)
+        if self.env.is_docked():
+            print('WIN!')
+        if not term or trunc:
+            if not self.is_drifting:
+                is_drift, the_time = self.det_drift()
+                if is_drift:
+                    self.is_drifting = True
+        return obs, rew, term, trunc, info
+
+    def det_drift(self):
+        new_env = copy.deepcopy(self.env)
+        t = 0
+        for j in range(self.env.lookahead_len):  # TODO create hyperparameter
+            drift_action = np.array([0.0, 0.0, 0.0])
+            t += 1
+            obs, rew, term, trunc, info = new_env.step(drift_action, True)
+            if term:
+                return new_env.is_docked(), t
+            elif new_env.time_step >= new_env.lookahead_len:
+                return False, t
+        return False, t
