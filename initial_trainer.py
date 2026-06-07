@@ -7,7 +7,7 @@ import numpy as np
 from stable_baselines3 import PPO
 
 def curriculum_learn(model_id: int):
-    for curr in range(8, 10):
+    for curr in range(10, 11):
         print('Starting Curriculum: ', curr)
         configs, train_time = get_curriculum(curr)
         env = DriftEnv(**configs)
@@ -187,6 +187,6 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
     return configs, train_time
 
 if __name__ == "__main__":
-    # model_id = 1
-    # curriculum_learn(model_id)
-    test_model('data/checkpoints/safe_ppo_model_9_1.zip', 9)
+    model_id = 2
+    curriculum_learn(model_id)
+    # test_model('data/checkpoints/safe_ppo_model_9_1.zip', 9)
