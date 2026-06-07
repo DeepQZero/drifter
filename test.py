@@ -1,14 +1,15 @@
-from docking_env import SpaceCraftDockingEnv3D
+from drift_env import DriftEnv
 
 from stable_baselines3 import PPO
-
 import numpy as np
 
 model = PPO.load(
-    "data/ppo_logs/forward/models_docking/checkpoints"
-    "/ppo_docking2_1000000_steps.zip")
+    "data/checkpoints/ppo_1m_200000_steps.zip")
 
-env = SpaceCraftDockingEnv3D()
+env = DriftEnv(
+    min_init_pos_bound=0.5,
+    max_init_pos_bound=1
+)
 win_count = 0
 episode_time_steps = []
 fuels = []
@@ -28,7 +29,7 @@ for i in range(NUM_EPISODES):
         print(obs)
         done = term or trunc
         if done:
-            if reward > 0.95:
+            if reward > 0.99:
                 win_count += 1
                 print('Win')
             else:

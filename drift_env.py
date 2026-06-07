@@ -11,20 +11,22 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def __init__(self,
                  fixed_start=False,
                  reward_structure="dense",
-                 max_episode_len=10,
+                 max_episode_len=5,
                  max_lookahead_len=300,
                  max_boundary_box=175,
                  max_control=1,
                  max_total_dv=2_500,
-                 pos_thresh=10,
-                 speed_thresh=1,
+                 pos_thresh=10.0,
+                 speed_thresh=1.0,
                  min_init_pos_bound=10,
                  max_init_pos_bound=150,
                  max_init_vel_bound=0.1,
                  fixed_state=np.array([100, 0, 0, 0, 0, 0]),
                  step_len = 1,
                  fuel_used=None,
-                 time_step=None):
+                 time_step=None,
+                 drift_step_len=1
+                 ):
         self.lookahead_len = max_lookahead_len
         self.fixed_start = fixed_start
         self.fixed_state = fixed_state
@@ -55,6 +57,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
         self.state = None
         self.fuel_used = fuel_used
         self.time_step = time_step
+        self.drift_step_len = drift_step_len
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -66,8 +69,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
             self.state = self.sample_state_space()
         self.fuel_used = 0
         self.time_step = 0
-        self.lookahead_len = int(2*np.linalg.norm(self.state[0:3])) # TODO
-        self.max_boundary_box = int(np.linalg.norm(self.state[0:3])*1.2) # TODO
+        # self.lookahead_len = int(2*np.linalg.norm(self.state[0:3]))+5 # TODO
+        # self.max_boundary_box = int(np.linalg.norm(self.state[0:3])*1.2)+2 #
+        # TODO
         return self.state, info
 
     def sample_state_space(self):
@@ -82,10 +86,10 @@ class SpaceCraftDockingEnv3D(gym.Env):
             return self.sample_state_space()
         return sampled_state
 
-    def step(self, action):
+    def step(self, action, drift=False):
         old_state = np.copy(self.state)
         self.time_step += 1
-        self.state = self.propagate(action)
+        self.state = self.propagate(action, drift)
         self.fuel_used += vec_norm(action)
         reward, terminated, truncated = self.rewards(old_state)
         info = {}
@@ -124,7 +128,11 @@ class SpaceCraftDockingEnv3D(gym.Env):
             prox_penalty = (self.proximity_penalty_coeff *
                             (current_distance - prev_distance))
 
-            tot_step_rew += (vel_penalty + prox_penalty + self.time_penalty)
+            tot_step_rew += (prox_penalty + self.time_penalty)
+
+            term = term or (max(current_speed - speed_limit, 0) > 0)  # TODO put in sparse
+            if max(current_speed - speed_limit, 0) > 0:
+                print("UNSAFE!")
 
         return tot_step_rew, term, trunc
 
@@ -148,8 +156,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def is_out_of_time(self):
         return self.time_step >= self.max_episode_len
 
-    def propagate(self, action):
-        t_span = (self.time_step, self.time_step + self.step_len)
+    def propagate(self, action, drift=False):
+        step_len = self.step_len if not drift else self.drift_step_len
+        t_span = (self.time_step, self.time_step + step_len)
         result = solve_ivp(self.dynamics, t_span, self.state,
                            args=(action,), method='RK45')
         time_points, state_vectors = result.t, result.y
@@ -176,8 +185,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
 
 class DriftEnv(gym.Env):
-    def __init__(self):
-        self.env = SpaceCraftDockingEnv3D()
+    def __init__(self, **kwargs):
+        self.env = SpaceCraftDockingEnv3D(
+            **kwargs)
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
 
@@ -189,20 +199,58 @@ class DriftEnv(gym.Env):
         if self.env.is_docked():
             print('WIN!')
         if not term or trunc:
-            if self.det_drift():
-                print('DRIFTED!')
+            is_drift, the_time = self.det_drift()
+            if is_drift:
+                print('DRIFTED! ', the_time)
                 rew += 10
                 term = True
         return obs, rew, term, trunc, info
 
+    def det_drift(self):
+        new_env = copy.deepcopy(self.env)
+        t = 0
+        for j in range(self.env.lookahead_len):  # TODO create hyperparameter
+            drift_action = np.array([0.0, 0.0, 0.0])
+            t += 1
+            obs, rew, term, trunc, info = new_env.step(drift_action, True)
+            if term:
+                return new_env.is_docked(), t
+            elif new_env.time_step >= new_env.lookahead_len:
+                return False, t
+        return False, t
+
+
+class DriftEnv2(gym.Env):
+    def __init__(self, **kwargs):
+        self.env = SpaceCraftDockingEnv3D(
+            **kwargs)
+        self.observation_space = self.env.observation_space
+        self.action_space = self.env.action_space
+        self.is_drifting = False
+
+    def reset(self, seed=None, options=None):
+        return self.env.reset()
+
+    def step(self, act):
+        obs, rew, term, trunc, info = self.env.step(act)
+        if self.env.is_docked():
+            print('WIN!')
+        if not term or trunc:
+            if not self.is_drifting:
+                is_drift, the_time = self.det_drift()
+                if is_drift:
+                    self.is_drifting = True
+        return obs, rew, term, trunc, info
 
     def det_drift(self):
         new_env = copy.deepcopy(self.env)
+        t = 0
         for j in range(self.env.lookahead_len):  # TODO create hyperparameter
             drift_action = np.array([0.0, 0.0, 0.0])
-            obs, rew, term, trunc, info = new_env.step(drift_action)
+            t += 1
+            obs, rew, term, trunc, info = new_env.step(drift_action, True)
             if term:
-                return new_env.is_docked()
+                return new_env.is_docked(), t
             elif new_env.time_step >= new_env.lookahead_len:
-                return False
-        return False
+                return False, t
+        return False, t
