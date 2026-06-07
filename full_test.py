@@ -44,4 +44,3 @@ for _ in range(100):
 
 print(wins, np.mean(wins))
 print(sorted(fuels, reverse=True), np.median(fuels), np.mean(fuels))
-
