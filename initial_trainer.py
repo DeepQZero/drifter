@@ -7,7 +7,7 @@ import numpy as np
 from stable_baselines3 import PPO
 
 def curriculum_learn(model_id: int):
-    for curr in range(10):
+    for curr in range(3, 10):
         print('Starting Curriculum: ', curr)
         configs, train_time = get_curriculum(curr)
         env = DriftTrainEnv(**configs)
@@ -34,16 +34,13 @@ def test_model(path, curriculum):
     model = PPO.load(path, env=env)
     all_rews, all_fuels, all_docks = [], [], []
     for i in range(100):
-        print(i)
         done = False
         obs, info = env.reset()
-        print(obs)
         epi_fuel, epi_reward = 0, 0
         is_drift = False
         while not done:
             action = model.predict(obs, deterministic=True)[0]
             obs, reward, term, trunc, info = env.step(action)
-            print(obs)
             epi_reward += reward
             epi_fuel += np.linalg.norm(action)
             is_drift, _ = env.det_drift()
@@ -55,7 +52,6 @@ def test_model(path, curriculum):
                     all_docks.append(0)
                 all_rews.append(epi_reward)
                 all_fuels.append(epi_fuel)
-    print(all_docks)
     print('Model Stats for Curriculum: ', curriculum)
     print('Dock: ', np.mean(all_docks),
           'Reward: ', np.mean(all_rews),
@@ -102,17 +98,19 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_pos_bound'] = 3
         configs['max_init_vel_bound'] = 0.2
     if curriculum >= 2:
+        configs['pos_thresh'] = 2.5
+        configs['speed_thresh'] = 0.2
         configs['max_episode_len'] = 5
-        configs['max_lookahead_len'] = 75
+        configs['max_lookahead_len'] = 50
         configs['max_boundary_box'] = 20
-        configs['min_init_pos_bound'] = 0.5
-        configs['max_init_pos_bound'] = 6
+        configs['min_init_pos_bound'] = 2.5
+        configs['max_init_pos_bound'] = 5
         configs['max_init_vel_bound'] = 0.2
     if curriculum >= 3:
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 100
         configs['max_boundary_box'] = 30
-        configs['min_init_pos_bound'] = 0.5
+        configs['min_init_pos_bound'] = 2.5
         configs['max_init_pos_bound'] = 10
         configs['max_init_vel_bound'] = 0.2
     if curriculum >= 4:
