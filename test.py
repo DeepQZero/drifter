@@ -1,15 +1,15 @@
-from drift_env import DriftEnv
+from drift_env import DriftTrainEnv
+from initial_trainer import get_curriculum
 
 from stable_baselines3 import PPO
 import numpy as np
 
 model = PPO.load(
-    "data/checkpoints/ppo_1m_200000_steps.zip")
+    "data/checkpoints/safe_ppo_model_6_3.zip")
 
-env = DriftEnv(
-    min_init_pos_bound=0.5,
-    max_init_pos_bound=1
-)
+curriculum, _ = get_curriculum(6)
+env = DriftTrainEnv(**curriculum)
+
 win_count = 0
 episode_time_steps = []
 fuels = []
@@ -26,10 +26,10 @@ for i in range(NUM_EPISODES):
         action, _ = model.predict(obs, deterministic=True)
         episode_fuel += np.linalg.norm(action)
         obs, reward, term, trunc, info = env.step(action)
-        print(obs)
+        # print(obs)
         done = term or trunc
         if done:
-            if reward > 0.99:
+            if reward > 9:
                 win_count += 1
                 print('Win')
             else:

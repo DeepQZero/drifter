@@ -106,7 +106,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
             high=np.array([self.abs_max_init_dist]*3 + [self.abs_max_vel]*3)
         )
         sampled_state = initial_state_space.sample()
-        if not (self.abs_min_init_dist <= vec_norm(sampled_state) <= self.abs_max_init_dist):
+        if ((vec_norm(sampled_state[0:3]) < self.abs_min_init_dist) or
+            (vec_norm(sampled_state[0:3]) > self.abs_max_init_dist) or
+            (vec_norm(sampled_state[3:6]) > self.abs_max_vel)):
             return self.sample_state_space()
         return sampled_state
 
