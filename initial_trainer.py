@@ -11,7 +11,7 @@ def curriculum_learn(model_id: int):
         print('Starting Curriculum: ', curr)
         configs, train_time = get_curriculum(curr)
         env = DriftTrainEnv(**configs)
-        if curr in [0]:
+        if curr == 0:
             model = PPO('MlpPolicy', env,
                         learning_rate=0.0003,
                         ent_coef=0.01,
@@ -33,27 +33,29 @@ def test_model(path, curriculum):
     env = DriftTrainEnv(**configs)
     model = PPO.load(path, env=env)
     all_rews, all_fuels, all_docks = [], [], []
-    for _ in range(100):
+    for i in range(100):
+        print(i)
         done = False
         obs, info = env.reset()
+        print(obs)
         epi_fuel, epi_reward = 0, 0
+        is_drift = False
         while not done:
-            action = model.predict(obs)[0]
+            action = model.predict(obs, deterministic=True)[0]
             obs, reward, term, trunc, info = env.step(action)
+            print(obs)
             epi_reward += reward
             epi_fuel += np.linalg.norm(action)
-            done = term or trunc
+            is_drift, _ = env.det_drift()
+            done = term or trunc or is_drift
             if done:
-                if env.env.is_docked():
+                if env.env.is_docked() or is_drift:
                     all_docks.append(1)
                 else:
-                    is_drift, t_t = env.det_drift()
-                    if is_drift:
-                        all_docks.append(1)
-                    else:
-                        all_docks.append(0)
+                    all_docks.append(0)
                 all_rews.append(epi_reward)
                 all_fuels.append(epi_fuel)
+    print(all_docks)
     print('Model Stats for Curriculum: ', curriculum)
     print('Dock: ', np.mean(all_docks),
           'Reward: ', np.mean(all_rews),
@@ -178,6 +180,6 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
     return configs, train_time
 
 if __name__ == "__main__":
-    model_id = 3
+    model_id = 4
     curriculum_learn(model_id)
-    # test_model('data/checkpoints/safe_ppo_model_9_1.zip', 9)
+    # test_model('data/checkpoints/safe_ppo_model_1_4.zip', 1)

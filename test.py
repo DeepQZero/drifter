@@ -5,9 +5,9 @@ from stable_baselines3 import PPO
 import numpy as np
 
 model = PPO.load(
-    "data/checkpoints/safe_ppo_model_6_3.zip")
+    "data/checkpoints/safe_ppo_model_1_4.zip")
 
-curriculum, _ = get_curriculum(6)
+curriculum, _ = get_curriculum(1)
 env = DriftTrainEnv(**curriculum)
 
 win_count = 0
