@@ -1,29 +1,32 @@
 import numpy as np
 
-from drift_env import DriftEnv2
+from drift_env import DriftTestEnv
 from initial_trainer import get_curriculum
 from stable_baselines3 import PPO
 
 import copy
 
 
-model_1 = PPO.load("data/checkpoints/safe_ppo_model_4_2.zip")
-model_2 = PPO.load("data/checkpoints/safe_ppo_model_7_2.zip")
-model_3 = PPO.load("data/checkpoints/safe_ppo_model_9_2.zip")
+model_1 = PPO.load("data/checkpoints/safe_ppo_model_1_5.zip")
+model_2 = PPO.load("data/checkpoints/safe_ppo_model_3_5.zip")
+model_3 = PPO.load("data/checkpoints/safe_ppo_model_6_5.zip")
+model_4 = PPO.load("data/checkpoints/safe_ppo_model_9_5.zip")
 
 
 fuels = []
 wins = []
 
-for _ in range(100):
+for i in range(100):
+    print(i)
+    print('starting at model 4')
     epi_fuel = 0
     curriculum, _ = get_curriculum(10)
-    env = DriftEnv2(**curriculum)
+    env = DriftTestEnv(**curriculum)
     obs, info = env.reset()
     done = False
 
-    model_num = 3
-    model = model_3
+    model_num = 4
+    model = model_4
 
     while not done:
         action = np.array([0.0, 0.0, 0.0]) if env.is_drifting else model.predict(obs)[0]
@@ -36,11 +39,21 @@ for _ in range(100):
                 fuels.append(epi_fuel)
             else:
                 done = False
-                model_num -= 1
-                model = model_2 if model_num == 2 else model_1
-                env.env.docking_pos_thresh = 10 if model_num == 2 else 0.5
-                env.env.docking_neg_thresh = 0.2 if model_num == 2 else 0.2
                 env.is_drifting = False
+                model_num -= 1
+                if model_num == 3:
+                    model = model_3
+                    env.env.docking_pos_thresh = 10
+                    env.env.docking_speed_thresh = 0.22
+                elif model_num == 2:
+                    model = model_2
+                    env.env.docking_pos_thresh = 2.5
+                    env.env.docking_speed_thresh = 0.2
+                else:
+                    model = model_1
+                    env.env.docking_pos_thresh = 0.5
+                    env.env.docking_speed_thresh = 0.2
+
 
 print(wins, np.mean(wins))
 print(sorted(fuels, reverse=True), np.median(fuels), np.mean(fuels))
