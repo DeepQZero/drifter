@@ -27,11 +27,16 @@ for i in range(100):
 
     model_num = 4
     model = model_4
-
+    t_step = 0
     while not done:
-        action = np.array([0.0, 0.0, 0.0]) if env.is_drifting else model.predict(obs)[0]
+        if env.is_drifting or (t_step % 4) in list(range(5, 10)): # TODO
+            action = np.array([0.0, 0.0, 0.0])
+        else:
+            action = model.predict(obs)[0]
         epi_fuel += np.linalg.norm(action)
         obs, reward, term, trunc, info = env.step(action)
+        t_step += 1
+        print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
         done = term or trunc
         if done:
             if model_num == 1:
@@ -40,6 +45,7 @@ for i in range(100):
             else:
                 done = False
                 env.is_drifting = False
+                t_step = 0
                 model_num -= 1
                 if model_num == 3:
                     model = model_3
@@ -57,3 +63,6 @@ for i in range(100):
 
 print(wins, np.mean(wins))
 print(sorted(fuels, reverse=True), np.median(fuels), np.mean(fuels))
+print(sorted(fuels, reverse=False)[24],
+      sorted(fuels, reverse=False)[50],
+      sorted(fuels, reverse=False)[75])
