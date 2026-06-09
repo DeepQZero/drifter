@@ -188,6 +188,6 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
     return configs, train_time
 
 if __name__ == "__main__":
-    model_id = 5
+    model_id = 7
     curriculum_learn(model_id)
     # test_model('data/checkpoints/safe_ppo_model_1_4.zip', 1)

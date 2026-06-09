@@ -7,10 +7,10 @@ from stable_baselines3 import PPO
 import copy
 
 
-model_1 = PPO.load("data/checkpoints/safe_ppo_model_1_5.zip")
-model_2 = PPO.load("data/checkpoints/safe_ppo_model_3_5.zip")
-model_3 = PPO.load("data/checkpoints/safe_ppo_model_6_5.zip")
-model_4 = PPO.load("data/checkpoints/safe_ppo_model_9_5.zip")
+model_1 = PPO.load("data/checkpoints/safe_ppo_model_1_7.zip")
+model_2 = PPO.load("data/checkpoints/safe_ppo_model_3_7.zip")
+model_3 = PPO.load("data/checkpoints/safe_ppo_model_6_7.zip")
+model_4 = PPO.load("data/checkpoints/safe_ppo_model_9_7.zip")
 
 
 fuels = []
