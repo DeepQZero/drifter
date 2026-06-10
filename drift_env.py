@@ -106,11 +106,16 @@ class SpaceCraftDockingEnv3D(gym.Env):
             high=np.array([self.abs_max_init_dist]*3 + [self.abs_max_vel]*3)
         )
         sampled_state = initial_state_space.sample()
-        if ((vec_norm(sampled_state[0:3]) < self.abs_min_init_dist) or
-            (vec_norm(sampled_state[0:3]) > self.abs_max_init_dist) or
-            (vec_norm(sampled_state[3:6]) > 0.2 + 2 * self.n * vec_norm(
-                sampled_state[3:6]))):
+        
+        distance = vec_norm(sampled_state[0:3])   # Position magnitude
+        speed = vec_norm(sampled_state[3:6])      # Velocity magnitude
+
+        # Reject samples outside valid spatial bounds or violating initial speed constraint
+        if (distance < self.abs_min_init_dist
+            or distance > self.abs_max_init_dist
+            or speed > 0.2 + 2 * self.n * distance):  # Speed limit increases with distance
             return self.sample_state_space()
+
         return sampled_state
 
     def step(self, action: np.ndarray, drift=False) -> \
@@ -127,11 +132,27 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def propagate(self, action: np.ndarray, drift: bool=False) -> np.ndarray:
         """Computes new state."""
         step_len = self.step_len if not drift else self.drift_step_len
-        t_span = (self.time_step, self.time_step + step_len)
-        result = solve_ivp(self.dynamics, t_span, self.state,
-                           args=(action,), method='RK45')
-        time_points, state_vectors = result.t, result.y
-        new_state = state_vectors[:, -1]
+        t_span = (0, step_len)
+
+        # Euler integration might be sufficient here because the CW dynamics are linear.
+        # It might also be faster than the current solve_ivp with RK45 (5(4) Runge-Kutta method).
+        # derivative = self.dynamics(self.time_step, self.state, action)
+        # new_state = self.state + step_len * derivative
+        result = solve_ivp(
+            self.dynamics,
+            t_span,
+            self.state,
+            args=(action,),
+            method='RK45',
+            rtol=1e-5,   # Stricter tolerances for stability
+            atol=1e-8
+        )
+        
+        # Safety check: avoid integration failure
+        if not result.success:
+            return self.state
+
+        new_state = result.y[:, -1]
         return new_state
 
     def dynamics(self, t, x, u):  # TODO type signature
@@ -232,7 +253,7 @@ class DriftTrainEnv(gym.Env):
         obs, rew, term, trunc, info = self.env.step(action)
         if self.env.is_docked():
             print('DOCKED!')
-        if not term or trunc:
+        if not term:
             is_drift, the_time = self.det_drift()
             if is_drift:
                 print('DRIFTED & DOCKED! ', the_time)
@@ -258,9 +279,9 @@ class DriftTrainEnv(gym.Env):
 
 class DriftTestEnv(gym.Env):
     """
-        Wrapper for docking environment that looks ahead each time step to
-        determine if docking condition can be achieved by drifting. Handles
-        multiple periods of drifting -- not just 1 such as during training!
+    Wrapper for docking environment that looks ahead each time step to
+    determine if docking condition can be achieved by drifting. Handles
+    multiple periods of drifting -- not just 1 such as during training!
     """
     def __init__(self, **kwargs) -> None:
         self.env = SpaceCraftDockingEnv3D(
@@ -278,7 +299,7 @@ class DriftTestEnv(gym.Env):
         obs, rew, term, trunc, info = self.env.step(action)
         if self.env.is_docked():
             print('WIN!')
-        if not term or trunc:
+        if not term:
             if not self.is_drifting:
                 is_drift, the_time = self.det_drift()
                 if is_drift:
@@ -298,3 +319,4 @@ class DriftTestEnv(gym.Env):
             elif new_env.time_step >= new_env.lookahead_len:
                 return False, t
         return False, t
+    
