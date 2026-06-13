@@ -1,12 +1,12 @@
-import gymnasium as gym
-
 from drift_env import DriftTrainEnv
 import typing as tt
 
 import numpy as np
 from stable_baselines3 import PPO
 
-def curriculum_learn(model_id: int):
+import os
+
+def curriculum_learn(model_id: int, run_dir: str):
     for curr in range(10):
         print('Starting Curriculum: ', curr)
         configs, train_time = get_curriculum(curr)
@@ -18,12 +18,17 @@ def curriculum_learn(model_id: int):
                         gamma=1.00,
                         verbose=1)
         else:
-            model = PPO.load('data/checkpoints/safe_ppo_model_'+str(
-                curr-1)+'_'+str(
-                model_id),  env=env)
+            prev_model_path = os.path.join(
+                run_dir,
+                f"safe_ppo_model_{curr - 1}_{model_id}"
+            )
+            model = PPO.load(prev_model_path, env=env)
+
         model.learn(total_timesteps=train_time)
-        save_path = 'data/checkpoints/safe_ppo_model_'+str(curr)+'_'+str(
-            model_id)
+        save_path = os.path.join(
+            run_dir,
+            f"safe_ppo_model_{curr}_{model_id}"
+        )
         model.save(save_path)
         test_model(save_path, curr)
         print('Saved Model: ', save_path)
@@ -176,7 +181,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_vel_bound'] = 0.5
         configs['drift_step_len'] = 10
     if curriculum >= 10:  # Testing Curriculum
-        configs['pos_thresh'] =50
+        configs['pos_thresh'] = 50
         configs['speed_thresh'] = 0.3
         configs['max_episode_len'] = 10_000
         configs['max_lookahead_len'] = 1000
@@ -188,6 +193,31 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
     return configs, train_time
 
 if __name__ == "__main__":
-    model_id = 7
-    curriculum_learn(model_id)
-    # test_model('data/checkpoints/safe_ppo_model_1_4.zip', 1)
+
+    base_dir = os.path.dirname(__file__)
+
+    checkpoints_dir = os.path.join(
+        base_dir,
+        "data",
+        "checkpoints"
+    )
+    os.makedirs(checkpoints_dir, exist_ok=True)
+
+    run_num = 1
+    while os.path.exists(
+        os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
+    ):
+        run_num += 1
+
+    run_dir = os.path.join(
+        checkpoints_dir,
+        f"safe_PPO_{run_num}"
+    )
+    os.makedirs(run_dir, exist_ok=True)
+
+    model_id = run_num
+
+    print(f"\nSaving models to: {run_dir}")
+    print(f"Model ID: {model_id}\n")
+
+    curriculum_learn(model_id, run_dir)
