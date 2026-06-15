@@ -7,10 +7,10 @@ from stable_baselines3 import PPO
 import copy
 
 
-model_1 = PPO.load("data/checkpoints/safe_ppo_model_1_5.zip")
-model_2 = PPO.load("data/checkpoints/safe_ppo_model_3_5.zip")
-model_3 = PPO.load("data/checkpoints/safe_ppo_model_6_5.zip")
-model_4 = PPO.load("data/checkpoints/safe_ppo_model_9_5.zip")
+model_1 = PPO.load("data/checkpoints/safe_ppo_model_9_1_0.zip")
+model_2 = PPO.load("data/checkpoints/safe_ppo_model_9_3_3.zip")
+model_3 = PPO.load("data/checkpoints/safe_ppo_model_9_6_4.zip")
+model_4 = PPO.load("data/checkpoints/safe_ppo_model_9_9_0.zip")
 
 
 fuels = []
@@ -32,10 +32,10 @@ for i in range(100):
         if env.is_drifting:
             action = np.array([0.0, 0.0, 0.0])
         else:
-            action = model.predict(obs)[0]
+            action = model.predict(obs, deterministic=True)[0]
         epi_fuel += float(np.sum(np.abs(action)))/env.env.m * env.env.step_len
         obs, reward, term, trunc, info = env.step(action)
-        print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
+        # print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
         done = term or trunc
         if done:
             if model_num == 1:

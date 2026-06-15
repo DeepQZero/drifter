@@ -276,8 +276,8 @@ class DriftTestEnv(gym.Env):
     def step(self, action) -> tuple[np.ndarray, float, bool, bool, dict]:
         """Standard Gymnasium step function."""
         obs, rew, term, trunc, info = self.env.step(action)
-        # if self.env.is_docked():
-        #     print('WIN!')
+        if self.env.is_docked():
+            print('WIN!')
         if not term:
             if not self.is_drifting:
                 is_drift, the_time = self.det_drift()

@@ -38,7 +38,7 @@ def test_model(path, curriculum) -> float:
     env = DriftTrainEnv(**configs)
     model = PPO.load(path, env=env)
     all_rews, all_fuels, all_docks = [], [], []
-    for i in range(100):
+    for i in range(1_000):
         done = False
         obs, info = env.reset()
         epi_fuel, epi_reward = 0, 0
@@ -57,11 +57,11 @@ def test_model(path, curriculum) -> float:
                     all_docks.append(0)
                 all_rews.append(epi_reward)
                 all_fuels.append(epi_fuel)
-    # print('Model Stats for Curriculum: ', curriculum)
-    # print('Dock: ', np.mean(all_docks),
-    #       'Reward: ', np.mean(all_rews),
-    #       'Fuel: ', np.mean(all_fuels)
-    #      )
+    print('Model Stats for Curriculum:', curriculum)
+    print('Dock: ', np.mean(all_docks),
+          'Reward: ', np.mean(all_rews),
+          'Fuel: ', np.mean(all_fuels)
+         )
     return float(np.mean(all_docks))
 
 
@@ -181,9 +181,9 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_vel_bound'] = 0.5
         configs['drift_step_len'] = 10
     if curriculum >= 10:  # Testing Curriculum
-        configs['pos_thresh'] =50
+        configs['pos_thresh'] = 50
         configs['speed_thresh'] = 0.3
-        configs['max_episode_len'] = 10_000
+        configs['max_episode_len'] = 10_000  # TODO think about changing
         configs['max_lookahead_len'] = 1000
         configs['max_boundary_box'] = 200
         configs['min_init_pos_bound'] = 100
@@ -193,6 +193,6 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
     return configs, train_time
 
 if __name__ == "__main__":
-    model_id = 7
+    model_id = 9
     curriculum_learn(model_id)
-    # test_model('data/checkpoints/safe_ppo_model_1_4.zip', 1)
+    # test_model('data/checkpoints/safe_ppo_model_7_9_2.zip', 6)

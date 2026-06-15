@@ -1,3 +1,4 @@
+# TODO docking but not drifting is not worth anything. This doesn't work.
 from drift_env import DriftTrainEnv
 from initial_trainer import get_curriculum
 
@@ -5,16 +6,16 @@ from stable_baselines3 import PPO
 import numpy as np
 
 model = PPO.load(
-    "data/checkpoints/safe_ppo_model_9_7.zip")
+    "data/checkpoints/safe_ppo_model_7_6_4.zip")
 
-curriculum, _ = get_curriculum(9)
+curriculum, _ = get_curriculum(6)
 env = DriftTrainEnv(**curriculum)
 
 win_count = 0
 episode_time_steps = []
 fuels = []
 
-NUM_EPISODES = 100
+NUM_EPISODES = 1000
 for i in range(NUM_EPISODES):
     obs, _ = env.reset()
     done = False
@@ -26,9 +27,10 @@ for i in range(NUM_EPISODES):
         action, _ = model.predict(obs, deterministic=True)
         episode_fuel += np.linalg.norm(action)
         obs, reward, term, trunc, info = env.step(action)
-        # print(obs)
         done = term or trunc
+        print(done)
         if done:
+            print(reward)
             if reward > 9:
                 win_count += 1
                 print('Win')
