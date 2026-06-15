@@ -7,9 +7,10 @@ import numpy as np
 from stable_baselines3 import PPO
 
 def curriculum_learn(model_id: int):
+    epoch = 0
     for curr in range(10):
         print('Starting Curriculum: ', curr)
-        configs, train_time = get_curriculum(curr)
+        configs, _ = get_curriculum(curr)
         env = DriftTrainEnv(**configs)
         if curr == 0:
             model = PPO('MlpPolicy', env,
@@ -19,17 +20,21 @@ def curriculum_learn(model_id: int):
                         verbose=1)
         else:
             model = PPO.load('data/checkpoints/safe_ppo_model_'+str(
-                curr-1)+'_'+str(
-                model_id),  env=env)
-        model.learn(total_timesteps=train_time)
-        save_path = 'data/checkpoints/safe_ppo_model_'+str(curr)+'_'+str(
-            model_id)
-        model.save(save_path)
-        test_model(save_path, curr)
-        print('Saved Model: ', save_path)
+                model_id)+'_'+str(curr-1)+'_'+str(epoch),  env=env)
+        score = 0
+        epoch = -1
+        while score < 0.99:
+            epoch += 1
+            # TODO what happens if model diverges?
+            model.learn(total_timesteps=25_000)
+            save_path = 'data/checkpoints/safe_ppo_model_'+str(
+                model_id)+'_'+str(curr)+'_'+str(epoch)
+            model.save(save_path)
+            score = test_model(save_path, curr)
+            print('Saved Model: ', save_path, ' Score: ', score)
 
-def test_model(path, curriculum):
-    configs, train_time = get_curriculum(curriculum)
+def test_model(path, curriculum) -> float:
+    configs, _ = get_curriculum(curriculum)
     env = DriftTrainEnv(**configs)
     model = PPO.load(path, env=env)
     all_rews, all_fuels, all_docks = [], [], []
@@ -52,12 +57,12 @@ def test_model(path, curriculum):
                     all_docks.append(0)
                 all_rews.append(epi_reward)
                 all_fuels.append(epi_fuel)
-    print('Model Stats for Curriculum: ', curriculum)
-    print('Dock: ', np.mean(all_docks),
-          'Reward: ', np.mean(all_rews),
-          'Fuel: ', np.mean(all_fuels)
-         )
-    print()
+    # print('Model Stats for Curriculum: ', curriculum)
+    # print('Dock: ', np.mean(all_docks),
+    #       'Reward: ', np.mean(all_rews),
+    #       'Fuel: ', np.mean(all_fuels)
+    #      )
+    return float(np.mean(all_docks))
 
 
 def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:

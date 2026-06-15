@@ -7,10 +7,10 @@ from stable_baselines3 import PPO
 import copy
 
 
-model_1 = PPO.load("data/checkpoints/safe_ppo_model_1_7.zip")
-model_2 = PPO.load("data/checkpoints/safe_ppo_model_3_7.zip")
-model_3 = PPO.load("data/checkpoints/safe_ppo_model_6_7.zip")
-model_4 = PPO.load("data/checkpoints/safe_ppo_model_9_7.zip")
+model_1 = PPO.load("data/checkpoints/safe_ppo_model_1_5.zip")
+model_2 = PPO.load("data/checkpoints/safe_ppo_model_3_5.zip")
+model_3 = PPO.load("data/checkpoints/safe_ppo_model_6_5.zip")
+model_4 = PPO.load("data/checkpoints/safe_ppo_model_9_5.zip")
 
 
 fuels = []
@@ -27,15 +27,14 @@ for i in range(100):
 
     model_num = 4
     model = model_4
-    t_step = 0
+    current_dist = np.linalg.norm(obs[0:3])
     while not done:
-        if env.is_drifting or (t_step % 4) in list(range(5, 10)): # TODO
+        if env.is_drifting:
             action = np.array([0.0, 0.0, 0.0])
         else:
             action = model.predict(obs)[0]
-        epi_fuel += np.linalg.norm(action)
+        epi_fuel += float(np.sum(np.abs(action)))/env.env.m * env.env.step_len
         obs, reward, term, trunc, info = env.step(action)
-        t_step += 1
         print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
         done = term or trunc
         if done:
@@ -45,17 +44,20 @@ for i in range(100):
             else:
                 done = False
                 env.is_drifting = False
-                t_step = 0
+                env.env.time_step = 0
                 model_num -= 1
                 if model_num == 3:
+                    print('model 3')
                     model = model_3
                     env.env.docking_pos_thresh = 10
                     env.env.docking_speed_thresh = 0.22
                 elif model_num == 2:
+                    print('model 2')
                     model = model_2
                     env.env.docking_pos_thresh = 2.5
                     env.env.docking_speed_thresh = 0.2
                 else:
+                    print('model 1')
                     model = model_1
                     env.env.docking_pos_thresh = 0.5
                     env.env.docking_speed_thresh = 0.2
