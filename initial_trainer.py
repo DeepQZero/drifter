@@ -10,7 +10,7 @@ def curriculum_learn(model_id: int):
     epoch = 0
     for curr in range(10):
         print('Starting Curriculum: ', curr)
-        configs, _ = get_curriculum(curr)
+        configs, threshold = get_curriculum(curr)
         env = DriftTrainEnv(**configs)
         if curr == 0:
             model = PPO('MlpPolicy', env,
@@ -23,7 +23,7 @@ def curriculum_learn(model_id: int):
                 model_id)+'_'+str(curr-1)+'_'+str(epoch),  env=env)
         score = 0
         epoch = -1
-        while score < 0.99:
+        while score < threshold:
             epoch += 1
             # TODO what happens if model diverges?
             model.learn(total_timesteps=25_000)
@@ -65,7 +65,7 @@ def test_model(path, curriculum) -> float:
     return float(np.mean(all_docks))
 
 
-def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
+def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
     configs = {
         'fixed_start' : False,
         'fixed_state' : np.array([100, 0, 0, 0, 0, 0]),  # TODO change if neces.
@@ -85,9 +85,9 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         'time_step' : None,
         'drift_step_len' : 1
     }
-    train_time = 50_000
+    threshold = 0.99
     if curriculum >= 0:
-        train_time = 50_000
+        threshold = 0.95
         configs['pos_thresh'] = 0.5
         configs['speed_thresh'] = 0.2
         configs['max_episode_len'] = 5
@@ -97,15 +97,15 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_pos_bound'] = 1
         configs['max_init_vel_bound'] = 0.2
     if curriculum >= 1:
-        train_time = 100_000
+        threshold = 0.99
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 50
         configs['max_boundary_box'] = 10
         configs['min_init_pos_bound'] = 0.5
-        configs['max_init_pos_bound'] = 3
+        configs['max_init_pos_bound'] = 2.5
         configs['max_init_vel_bound'] = 0.2
     if curriculum >= 2:
-        train_time = 50_000
+        threshold = 0.95
         configs['pos_thresh'] = 2.5
         configs['speed_thresh'] = 0.2
         configs['max_episode_len'] = 5
@@ -115,7 +115,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_pos_bound'] = 5
         configs['max_init_vel_bound'] = 0.2
     if curriculum >= 3:
-        train_time = 100_000
+        threshold = 0.99
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 100
         configs['max_boundary_box'] = 30
@@ -123,7 +123,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_pos_bound'] = 10
         configs['max_init_vel_bound'] = 0.2
     if curriculum >= 4:
-        train_time = 50_000
+        threshold = 0.95
         configs['pos_thresh'] = 10
         configs['speed_thresh'] = 0.22
         configs['max_episode_len'] = 5
@@ -134,7 +134,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_vel_bound'] = 0.3
         configs['drift_step_len'] = 10
     if curriculum >= 5:
-        train_time = 100_000
+        threshold = 0.95
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 25
         configs['max_boundary_box'] = 40
@@ -143,7 +143,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_vel_bound'] = 0.3
         configs['drift_step_len'] = 10
     if curriculum >= 6:
-        train_time = 100_000
+        threshold = 0.99
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 50
         configs['max_boundary_box'] = 60
@@ -152,7 +152,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_vel_bound'] = 0.3
         configs['drift_step_len'] = 10
     if curriculum >= 7:
-        train_time = 50_000
+        threshold = 0.95
         configs['pos_thresh'] = 50
         configs['speed_thresh'] = 0.3
         configs['max_episode_len'] = 5
@@ -163,7 +163,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_vel_bound'] = 0.5
         configs['drift_step_len'] = 10
     if curriculum >= 8:
-        train_time = 100_000
+        threshold = 0.95
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 100
         configs['max_boundary_box'] = 200
@@ -172,7 +172,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_vel_bound'] = 0.5
         configs['drift_step_len'] = 10
     if curriculum >= 9:
-        train_time = 100_000
+        threshold = 0.99
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 100
         configs['max_boundary_box'] = 200
@@ -190,9 +190,9 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, int]:
         configs['max_init_pos_bound'] = 150
         configs['max_init_vel_bound'] = 0.5
         configs['drift_step_len'] = 1
-    return configs, train_time
+    return configs, threshold
 
 if __name__ == "__main__":
-    model_id = 9
+    model_id = 2
     curriculum_learn(model_id)
     # test_model('data/checkpoints/safe_ppo_model_7_9_2.zip', 6)
