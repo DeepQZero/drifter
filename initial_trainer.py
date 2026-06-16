@@ -183,7 +183,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
     if curriculum >= 10:  # Testing Curriculum
         configs['pos_thresh'] = 50
         configs['speed_thresh'] = 0.3
-        configs['max_episode_len'] = 10_000  # TODO think about changing
+        configs['max_episode_len'] = 9_000  # TODO think about changing
         configs['max_lookahead_len'] = 1000
         configs['max_boundary_box'] = 200
         configs['min_init_pos_bound'] = 100

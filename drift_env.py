@@ -36,7 +36,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
     """
     def __init__(self,
                  fixed_start=False,
-                 fixed_state=np.array([100, 0, 0, 0, 0, 0]),
+                 fixed_state=np.array([100, 0, 0, 0, 0, 0, 0]),
                  reward_structure="dense",
                  max_episode_len=10_000,
                  max_lookahead_len=1_000,
@@ -81,8 +81,8 @@ class SpaceCraftDockingEnv3D(gym.Env):
             high=np.array([self.u_max]*3)
         )
         self.observation_space = spaces.Box(
-            low=np.array([-np.inf]*6),
-            high=np.array([np.inf]*6)
+            low=np.array([-np.inf]*7),
+            high=np.array([np.inf]*7)
         )
         self.state = None
 
@@ -111,7 +111,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
             (vec_norm(sampled_state[3:6]) > 0.2 + 2 * self.n * vec_norm(
                 sampled_state[3:6]))):
             return self.sample_state_space()
-        return sampled_state
+        return np.concatenate([sampled_state, np.array([0])])
 
     def step(self, action: np.ndarray, drift=False) -> \
             tuple[np.ndarray, float, bool, bool, dict]:
@@ -128,11 +128,11 @@ class SpaceCraftDockingEnv3D(gym.Env):
         """Computes new state."""
         step_len = self.step_len if not drift else self.drift_step_len
         t_span = (self.time_step, self.time_step + step_len)
-        result = solve_ivp(self.dynamics, t_span, self.state,
+        result = solve_ivp(self.dynamics, t_span, self.state[0:6],
                            args=(action,), method='RK45')
         time_points, state_vectors = result.t, result.y
         new_state = state_vectors[:, -1]
-        return new_state
+        return np.concatenate([new_state, np.array([1+self.state[6]])])
 
     def dynamics(self, t, x, u):  # TODO type signature
         """Computes new state using CWH equations."""
@@ -163,11 +163,11 @@ class SpaceCraftDockingEnv3D(gym.Env):
         out_of_time = self.is_out_of_time()
         out_of_fuel = self.is_out_of_fuel()
         out_of_bounds = self.is_out_of_bounds()
+        unsafe = self.is_unsafe()
 
-        speed_limit = 0.2 + (2 * self.n) * current_distance
-        term = docked or crashed or out_of_bounds or out_of_fuel or \
-               (max(current_speed - speed_limit, 0) > 0)
-        trunc = False if term else out_of_time
+        term = (docked or crashed or out_of_bounds or out_of_fuel or unsafe or
+                out_of_time)
+        trunc = False
 
         if self.reward_structure == "sparse":
             tot_step_rew = 1 if docked else 0
@@ -181,8 +181,6 @@ class SpaceCraftDockingEnv3D(gym.Env):
             prox_penalty = (self.proximity_penalty_coeff *
                             (current_distance - prev_distance))
             tot_step_rew += (prox_penalty + self.time_penalty)
-            # if max(current_speed - speed_limit, 0) > 0:
-            #     print("UNSAFE!")
         return tot_step_rew, term, trunc
 
     def is_docked(self) -> bool:
@@ -205,7 +203,23 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
     def is_out_of_time(self):
         """Determines if episode is out of time."""
-        return self.time_step >= self.max_episode_len
+        return self.state[6] >= self.max_episode_len
+
+    def is_unsafe(self):
+        current_distance = float(vec_norm(self.state[0:3]))  # TODO float?
+        current_speed = float(vec_norm(self.state[3:6]))
+        speed_limit = 0.2 + (2 * self.n) * current_distance
+        return max(current_speed - speed_limit, 0) > 0
+
+    def only_oot(self):
+        return (not (self.is_docked() or self.is_crashed() or
+                     self.is_out_of_bounds() or self.is_out_of_fuel()
+                     or self.is_unsafe())) and self.is_out_of_time()
+
+    def term_other_than_oot(self):
+        return (self.is_docked() or self.is_crashed() or
+                self.is_out_of_bounds() or self.is_out_of_fuel()
+                or self.is_unsafe())
 
     def close(self) -> None:
         """Standard Gymnasium close function."""
@@ -230,12 +244,10 @@ class DriftTrainEnv(gym.Env):
             tuple[np.ndarray, float, bool, bool, dict]:
         """Standard Gymnasium step function."""
         obs, rew, term, trunc, info = self.env.step(action)
-        # if self.env.is_docked():
-        #     print('DOCKED!')
-        if not term:
+        done = term or trunc
+        if (not done) or (self.env.only_oot()):
             is_drift, the_time = self.det_drift()
             if is_drift:
-                # print('DRIFTED & DOCKED! ', the_time)
                 rew += 10
                 term = True
         return obs, rew, term, trunc, info
@@ -247,12 +259,9 @@ class DriftTrainEnv(gym.Env):
         for j in range(self.env.lookahead_len):
             drift_action = np.array([0.0, 0.0, 0.0])
             t += 1
-            obs, rew, term, trunc, info = new_env.step(drift_action, True)
-            if term:  # no trunc here -- env will be trunc due to time out
-                # possibly, but we keep drifting
+            new_env.step(drift_action, True)
+            if new_env.term_other_than_oot():
                 return new_env.is_docked(), t
-            elif new_env.time_step >= new_env.lookahead_len:
-                return False, t
         return False, t
 
 
