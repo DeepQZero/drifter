@@ -1,14 +1,14 @@
 # TODO docking but not drifting is not worth anything. This doesn't work.
-from drift_env import DriftTrainEnv
+from drift_env import DriftTestEnv3, DriftTrainEnv
 from initial_trainer import get_curriculum
 
 from stable_baselines3 import PPO
 import numpy as np
 
 model = PPO.load(
-    "data/checkpoints/safe_ppo_model_7_6_4.zip")
+    "data/checkpoints/safe_ppo_model_2_9_2.zip")
 
-curriculum, _ = get_curriculum(6)
+curriculum, _ = get_curriculum(9)
 env = DriftTrainEnv(**curriculum)
 
 win_count = 0

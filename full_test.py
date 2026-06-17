@@ -7,10 +7,10 @@ from stable_baselines3 import PPO
 import copy
 
 
-model_1 = PPO.load("data/checkpoints/safe_ppo_model_9_1_0.zip")
-model_2 = PPO.load("data/checkpoints/safe_ppo_model_9_3_3.zip")
-model_3 = PPO.load("data/checkpoints/safe_ppo_model_9_6_4.zip")
-model_4 = PPO.load("data/checkpoints/safe_ppo_model_9_9_0.zip")
+model_1 = PPO.load("data/checkpoints/safe_ppo_model_3_1_0.zip")
+model_2 = PPO.load("data/checkpoints/safe_ppo_model_3_3_3.zip")
+model_3 = PPO.load("data/checkpoints/safe_ppo_model_3_6_8.zip")
+model_4 = PPO.load("data/checkpoints/safe_ppo_model_2_9_2.zip")
 
 
 fuels = []
@@ -22,12 +22,11 @@ for i in range(100):
     epi_fuel = 0
     curriculum, _ = get_curriculum(10)
     env = DriftTestEnv(**curriculum)
+
     obs, info = env.reset()
     done = False
-
     model_num = 4
     model = model_4
-    current_dist = np.linalg.norm(obs[0:3])
     while not done:
         if env.is_drifting:
             action = np.array([0.0, 0.0, 0.0])
@@ -35,7 +34,7 @@ for i in range(100):
             action = model.predict(obs, deterministic=True)[0]
         epi_fuel += float(np.sum(np.abs(action)))/env.env.m * env.env.step_len
         obs, reward, term, trunc, info = env.step(action)
-        # print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
+        print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
         done = term or trunc
         if done:
             if model_num == 1:
@@ -44,8 +43,11 @@ for i in range(100):
             else:
                 done = False
                 env.is_drifting = False
-                env.env.time_step = 0
+                env.env.state[6] = 0
                 model_num -= 1
+                # env.env.state[3] = 0.0
+                # env.env.state[4] = 0.0
+                # env.env.state[5] = 0.0
                 if model_num == 3:
                     print('model 3')
                     model = model_3

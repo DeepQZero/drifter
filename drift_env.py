@@ -73,8 +73,8 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
         self.n = 0.001027
         self.m = 12
-        self.time_penalty = -0.0005  # TODO delete
-        self.proximity_penalty_coeff = -0.0005  # TODO delete
+        self.time_penalty = -0.0005
+        self.proximity_penalty_coeff = -0.0005
         self.min_vel_penalty_coeff = -0.0075  # TODO delete
         self.action_space = spaces.Box(
             low=np.array([-self.u_max]*3),
@@ -106,10 +106,11 @@ class SpaceCraftDockingEnv3D(gym.Env):
             high=np.array([self.abs_max_init_dist]*3 + [self.abs_max_vel]*3)
         )
         sampled_state = initial_state_space.sample()
-        if ((vec_norm(sampled_state[0:3]) < self.abs_min_init_dist) or
-            (vec_norm(sampled_state[0:3]) > self.abs_max_init_dist) or
-            (vec_norm(sampled_state[3:6]) > 0.2 + 2 * self.n * vec_norm(
-                sampled_state[3:6]))):
+        rel_pos = vec_norm(sampled_state[0:3])
+        rel_vel = vec_norm(sampled_state[3:6])
+        if ((rel_pos < self.abs_min_init_dist) or
+            (rel_pos > self.abs_max_init_dist) or
+            (rel_vel > 0.2 + 2 * self.n * rel_pos)):
             return self.sample_state_space()
         return np.concatenate([sampled_state, np.array([0])])
 
@@ -268,26 +269,27 @@ class DriftTrainEnv(gym.Env):
 class DriftTestEnv(gym.Env):
     """
         Wrapper for docking environment that looks ahead each time step to
-        determine if docking condition can be achieved by drifting. Handles
-        multiple periods of drifting -- not just 1 such as during training!
+        determine if docking condition can be achieved by drifting.
     """
     def __init__(self, **kwargs) -> None:
-        self.env = SpaceCraftDockingEnv3D(
-            **kwargs)
+        self.env = SpaceCraftDockingEnv3D(**kwargs)
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
         self.is_drifting = False
 
     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
         """Standard Gymnasium reset function returning start state and info."""
+        self.is_drifting = False
         return self.env.reset()
 
-    def step(self, action) -> tuple[np.ndarray, float, bool, bool, dict]:
+    def step(self, action: np.ndarray) -> \
+            tuple[np.ndarray, float, bool, bool, dict]:
         """Standard Gymnasium step function."""
         obs, rew, term, trunc, info = self.env.step(action)
+        done = term or trunc
         if self.env.is_docked():
             print('WIN!')
-        if not term:
+        if (not done) or (self.env.only_oot()):
             if not self.is_drifting:
                 is_drift, the_time = self.det_drift()
                 if is_drift:
@@ -298,54 +300,10 @@ class DriftTestEnv(gym.Env):
         """Determines if drifting leads to a correct docking."""
         new_env = copy.deepcopy(self.env)
         t = 0
-        for j in range(self.env.lookahead_len):  # TODO create hyperparameter
+        for j in range(self.env.lookahead_len):
             drift_action = np.array([0.0, 0.0, 0.0])
             t += 1
-            obs, rew, term, trunc, info = new_env.step(drift_action, True)
-            if term:
+            new_env.step(drift_action, True)
+            if new_env.term_other_than_oot():
                 return new_env.is_docked(), t
-            elif new_env.time_step >= new_env.lookahead_len:
-                return False, t
         return False, t
-
-
-# class DriftTestEnv2(gym.Env):
-#     """
-#         Wrapper for docking environment that looks ahead each time step to
-#         determine if docking condition can be achieved by drifting. Handles
-#         multiple periods of drifting -- not just 1 such as during training!
-#     """
-#
-#     def __init__(self, **kwargs) -> None:
-#         self.env = SpaceCraftDockingEnv3D(
-#             **kwargs)
-#         self.observation_space = self.env.observation_space
-#         self.action_space = self.env.action_space
-#         self.is_drifting = False
-#
-#     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
-#         """Standard Gymnasium reset function returning start state and info."""
-#         return self.env.reset()
-#
-#     def step(self, action) -> tuple[np.ndarray, float, bool, bool, dict]:
-#         """Standard Gymnasium step function."""
-#         obs, rew, term, trunc, info = self.env.step(action)
-#         if self.env.is_docked():
-#             print('WIN!')
-#         if (not term) and (self.env.time_step == 5):
-#             self.is_drifting = True
-#         return obs, rew, term, trunc, info
-#
-#     def det_drift(self) -> tuple[bool, int]:
-#         """Determines if drifting leads to a correct docking."""
-#         new_env = copy.deepcopy(self.env)
-#         t = 0
-#         for j in range(self.env.lookahead_len):  # TODO create hyperparameter
-#             drift_action = np.array([0.0, 0.0, 0.0])
-#             t += 1
-#             obs, rew, term, trunc, info = new_env.step(drift_action, True)
-#             if term:
-#                 return new_env.is_docked(), t
-#             elif new_env.time_step >= new_env.lookahead_len:
-#                 return False, t
-#         return False, t
