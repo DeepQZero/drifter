@@ -12,3 +12,8 @@ combined models can be tested in `full_test.py`; place your models at the top
 - Action isn't set to deterministic for testing
 - Agent is docking and not drifting to dock (rewards are smaller for 
   docking than drifting)
+
+
+### Ideas 
+- Reduce entropy coefficient
+- Make POMDP and remove time step
