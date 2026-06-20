@@ -10,17 +10,18 @@ from numpy.linalg import norm as vec_norm
 class SpaceCraftDockingEnv3D(gym.Env):
     """
     The base docking environment in Gymnasium format.
+    # TODO rename attributes sometime
 
     Attributes:
         fixed_start (bool): If the environment start should be fixed or not.
-        fixed_state (numpy.ndarray): Fixed state of the environment.
-        reward_structure (str): "dense" if dense reward, "sparse" if sparse
-            reward.
+        fixed_state (numpy.ndarray): Fixed start state of the environment.
+        reward_structure (str): "dense" if dense reward, "sparse" otherwise.
         max_episode_len (int): Maximum episode length.
         max_lookahead_len (int): Maximum number of lookahead time steps.
         max_boundary_box (int): Maximum distance between chief and deputy.
-        max_control (float): Maximum dV allowed per thruster each time step.
-        max_total_dv (float): Maximum fuel of deputy in dV.
+        max_control (float): Maximum thrust in Newtons allowed per thruster
+        each time step.
+        max_dv (float): Maximum fuel of deputy in dV. # TODO check
         pos_thresh (float): Maximum distance between chief and deputy for a
             successful dock.
         speed_thresh (float): Maximum relative speed between chief and deputy
@@ -49,9 +50,9 @@ class SpaceCraftDockingEnv3D(gym.Env):
                  max_init_pos_bound=150.0,
                  max_init_vel_bound=0.5,
                  step_len=1,
+                 drift_step_len=1,
                  fuel_used=None,
-                 time_step=None,
-                 drift_step_len=1
+                 time_step=None
                  ) -> None:
         self.fixed_start = fixed_start
         self.fixed_state = fixed_state
@@ -60,22 +61,21 @@ class SpaceCraftDockingEnv3D(gym.Env):
         self.lookahead_len = max_lookahead_len
         self.max_boundary_box = max_boundary_box
         self.u_max = max_control
-        self.max_total_dv = max_total_dv
-        self.docking_pos_thresh = pos_thresh
-        self.docking_speed_thresh = speed_thresh
-        self.abs_min_init_dist = min_init_pos_bound
-        self.abs_max_init_dist = max_init_pos_bound
-        self.abs_max_vel = max_init_vel_bound
+        self.max_dv = max_total_dv
+        self.dock_dist = pos_thresh
+        self.dock_speed = speed_thresh
+        self.min_start_dist = min_init_pos_bound
+        self.max_start_dist = max_init_pos_bound
+        self.max_start_speed = max_init_vel_bound
         self.step_len = step_len
+        self.drift_step_len = drift_step_len
         self.fuel_used = fuel_used
         self.time_step = time_step
-        self.drift_step_len = drift_step_len
 
         self.n = 0.001027
-        self.m = 12
-        self.time_penalty = -0.0005
-        self.proximity_penalty_coeff = -0.0005
-        self.min_vel_penalty_coeff = -0.0075  # TODO delete
+        self.m = 12  # mass of spacecraft
+        self.time_penalty = -0.005  # TODO originally 0.0005
+        self.dist_coeff = -0.005  # TODO originally 0.0005
         self.action_space = spaces.Box(
             low=np.array([-self.u_max]*3),
             high=np.array([self.u_max]*3)
@@ -91,7 +91,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
         super().reset(seed=seed)
         np.random.seed(seed)
         info = {}
-        if self.fixed_start:
+        if self.fixed_start:  # TODO will need to add fuel used and time step
             self.state = np.copy(self.fixed_state)
         else:
             self.state = self.sample_state_space()
@@ -102,33 +102,34 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def sample_state_space(self) -> np.ndarray:
         """Samples and returns start state."""
         initial_state_space = spaces.Box(
-            low=np.array([-self.abs_max_init_dist]*3 + [-self.abs_max_vel]*3),
-            high=np.array([self.abs_max_init_dist]*3 + [self.abs_max_vel]*3)
+            low=np.array([-self.max_start_dist] * 3 + [-self.max_start_speed] * 3),
+            high=np.array([self.max_start_dist] * 3 + [self.max_start_speed] * 3)
         )
         sampled_state = initial_state_space.sample()
-        rel_pos = vec_norm(sampled_state[0:3])
-        rel_vel = vec_norm(sampled_state[3:6])
-        if ((rel_pos < self.abs_min_init_dist) or
-            (rel_pos > self.abs_max_init_dist) or
-            (rel_vel > 0.2 + 2 * self.n * rel_pos)):
-            return self.sample_state_space()
+        rel_dist = vec_norm(sampled_state[0:3])
+        rel_speed = vec_norm(sampled_state[3:6])
+        if ((rel_dist < self.min_start_dist) or
+            (rel_dist > self.max_start_dist) or
+            (rel_speed > 0.2 + 2 * self.n * rel_dist)):
+            return self.sample_state_space()  # TODO recursion error maybe?
         return np.concatenate([sampled_state, np.array([0])])
 
     def step(self, action: np.ndarray, drift=False) -> \
             tuple[np.ndarray, float, bool, bool, dict]:
         """Standard Gymnasium step function."""
-        self.time_step += 1
+        self.time_step += 1  # TODO remove?
         old_state = np.copy(self.state)  # deep copy
         self.state = self.propagate(action, drift)
-        self.fuel_used += vec_norm(action)
+        self.fuel_used += vec_norm(action)/self.m * self.step_len  # TODO
+        # TODO only allow fuel used to be a certain amount? Check paper.
         reward, terminated, truncated = self.rewards(old_state)
         info = {}
         return self.state, reward, terminated, truncated, info
 
     def propagate(self, action: np.ndarray, drift: bool=False) -> np.ndarray:
         """Computes new state."""
-        step_len = self.step_len if not drift else self.drift_step_len
-        t_span = (self.time_step, self.time_step + step_len)
+        dt = self.step_len if not drift else self.drift_step_len
+        t_span = (self.time_step, self.time_step + dt)
         result = solve_ivp(self.dynamics, t_span, self.state[0:6],
                            args=(action,), method='RK45')
         time_points, state_vectors = result.t, result.y
@@ -155,10 +156,6 @@ class SpaceCraftDockingEnv3D(gym.Env):
         """Computes step reward, termination, and truncation conditions."""
         tot_step_rew = 0
 
-        current_distance = float(vec_norm(self.state[0:3]))  # TODO float?
-        prev_distance = float(vec_norm(last_state[0:3]))
-        current_speed = float(vec_norm(self.state[3:6]))
-
         docked = self.is_docked()
         crashed = self.is_crashed()
         out_of_time = self.is_out_of_time()
@@ -172,45 +169,47 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
         if self.reward_structure == "sparse":
             tot_step_rew = 1 if docked else 0
-        if self.reward_structure == "dense":
+        if self.reward_structure == "dense":  # TODO det when training refiner
             if docked:
                 tot_step_rew += 1
             elif crashed:
                 tot_step_rew += -1
-            elif out_of_bounds or out_of_fuel or out_of_time:
+            elif out_of_bounds or out_of_fuel or out_of_time or unsafe:
                 tot_step_rew += -1
-            prox_penalty = (self.proximity_penalty_coeff *
+            current_distance = float(vec_norm(self.state[0:3]))  # TODO float?
+            prev_distance = float(vec_norm(last_state[0:3]))
+            prox_penalty = (self.dist_coeff *
                             (current_distance - prev_distance))
             tot_step_rew += (prox_penalty + self.time_penalty)
         return tot_step_rew, term, trunc
 
     def is_docked(self) -> bool:
         """Determines if deputy is docked."""
-        return (vec_norm(self.state[0:3]) < self.docking_pos_thresh and
-                vec_norm(self.state[3:6]) < self.docking_speed_thresh)
+        return (vec_norm(self.state[0:3]) < self.dock_dist and
+                vec_norm(self.state[3:6]) < self.dock_speed)
 
     def is_crashed(self) -> bool:
         """Determines if deputy has crashed."""
-        return (vec_norm(self.state[0:3]) < self.docking_pos_thresh) and \
-            (vec_norm(self.state[3:6]) >= self.docking_speed_thresh)
+        return (vec_norm(self.state[0:3]) < self.dock_dist and
+                vec_norm(self.state[3:6]) >= self.dock_speed)
 
     def is_out_of_fuel(self):
         """Determines if deputy is out of fuel."""
-        return self.fuel_used > self.max_total_dv
+        return self.fuel_used > self.max_dv
 
     def is_out_of_bounds(self):
         """Determines if deputy is out of bounds."""
-        return np.max(np.abs(self.state[0:3])) > self.max_boundary_box
+        return vec_norm(self.state[0:3]) > self.max_boundary_box
 
     def is_out_of_time(self):
         """Determines if episode is out of time."""
-        return self.state[6] >= self.max_episode_len
+        return self.state[6] >= self.max_episode_len  # TODO > or >=?
 
     def is_unsafe(self):
         current_distance = float(vec_norm(self.state[0:3]))  # TODO float?
         current_speed = float(vec_norm(self.state[3:6]))
         speed_limit = 0.2 + (2 * self.n) * current_distance
-        return max(current_speed - speed_limit, 0) > 0
+        return current_speed - speed_limit > 0
 
     def only_oot(self):
         return (not (self.is_docked() or self.is_crashed() or

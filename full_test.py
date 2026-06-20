@@ -58,18 +58,18 @@ for i in range(100):
                 if model_num == 3:
                     print('model 3')
                     model = model_3
-                    env.env.docking_pos_thresh = 10
-                    env.env.docking_speed_thresh = 0.22
+                    env.env.dock_dist = 10
+                    env.env.dock_speed = 0.22
                 elif model_num == 2:
                     print('model 2')
                     model = model_2
-                    env.env.docking_pos_thresh = 2.5
-                    env.env.docking_speed_thresh = 0.2
+                    env.env.dock_dist = 2.5
+                    env.env.dock_speed = 0.2
                 else:
                     print('model 1')
                     model = model_1
-                    env.env.docking_pos_thresh = 0.5
-                    env.env.docking_speed_thresh = 0.2
+                    env.env.dock_dist = 0.5
+                    env.env.dock_speed = 0.2
 
 
 print(wins, np.mean(wins))

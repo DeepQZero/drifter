@@ -17,3 +17,7 @@ combined models can be tested in `full_test.py`; place your models at the top
 ### Ideas 
 - Reduce entropy coefficient
 - Make POMDP and remove time step
+- Curricula could be more focused at start states (e.g. near 2.5, 10, 50, 150)
+
+### TODO
+- Do env.unwrapped

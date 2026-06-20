@@ -47,7 +47,7 @@ def test_model(path, curriculum) -> float:
             action = model.predict(obs, deterministic=True)[0]
             obs, reward, term, trunc, info = env.step(action)
             epi_reward += reward
-            epi_fuel += np.linalg.norm(action)  # TODO
+            epi_fuel += np.linalg.norm(action)/env.env.m * env.env.step_len
             is_drift, _ = env.det_drift()
             done = term or trunc or is_drift
             if done:
@@ -163,7 +163,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
         configs['max_init_vel_bound'] = 0.5
         configs['drift_step_len'] = 10
     if curriculum >= 8:
-        threshold = 0.95
+        threshold = 0.985
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 100
         configs['max_boundary_box'] = 200
@@ -193,6 +193,6 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
     return configs, threshold
 
 if __name__ == "__main__":
-    # model_id = 5
-    # curriculum_learn(model_id)
-    test_model('data/checkpoints/safe_ppo_model_5_9_2.zip', 9)
+    model_id = 6
+    curriculum_learn(model_id)
+    # test_model('data/checkpoints/safe_ppo_model_5_9_2.zip', 9)
