@@ -23,25 +23,29 @@ for i in range(100):
     # Create a fresh curriculum and environment for each run.
     curriculum, _ = get_curriculum(10)
     env = DriftTestEnv(**curriculum)
+
     obs, info = env.reset()
     done = False
-
     model_num = 4
     model = model_4
-    t_step = 0
+    # env.env.state[3] = 0.0
+    # env.env.state[4] = 0.0
+    # env.env.state[5] = 0.0
     while not done:
-        # Hold position during drift or during the scheduled no-action window.
-        if env.is_drifting or (t_step % 4) in list(range(5, 10)): # TODO
+        if env.is_drifting:
             action = np.array([0.0, 0.0, 0.0])
         else:
-            action = model.predict(obs)[0]
-        epi_fuel += np.linalg.norm(action)
+            action = model.predict(obs, deterministic=True)[0]
+        epi_fuel += float(np.sum(np.abs(action)))/env.env.m * env.env.step_len
         obs, reward, term, trunc, info = env.step(action)
-        t_step += 1
-        print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
+        # print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
         done = term or trunc
         if done:
             # Only score the episode after the final model completes.
+            if env.env.is_docked():
+                print('docked')
+            else:
+                print('model: ', model_num, ' fail')
             if model_num == 1:
                 wins.append(1) if env.env.is_docked() else wins.append(0)
                 fuels.append(epi_fuel)
@@ -49,20 +53,26 @@ for i in range(100):
                 # Step down through the model curriculum and continue the same run.
                 done = False
                 env.is_drifting = False
-                t_step = 0
+                env.env.state[6] = 0
                 model_num -= 1
+                # env.env.state[3] = 0.0
+                # env.env.state[4] = 0.0
+                # env.env.state[5] = 0.0
                 if model_num == 3:
+                    print('model 3')
                     model = model_3
-                    env.env.docking_pos_thresh = 10
-                    env.env.docking_speed_thresh = 0.22
+                    env.env.dock_dist = 10
+                    env.env.dock_speed = 0.22
                 elif model_num == 2:
+                    print('model 2')
                     model = model_2
-                    env.env.docking_pos_thresh = 2.5
-                    env.env.docking_speed_thresh = 0.2
+                    env.env.dock_dist = 2.5
+                    env.env.dock_speed = 0.2
                 else:
+                    print('model 1')
                     model = model_1
-                    env.env.docking_pos_thresh = 0.5
-                    env.env.docking_speed_thresh = 0.2
+                    env.env.dock_dist = 0.5
+                    env.env.dock_speed = 0.2
 
 
 print(wins, np.mean(wins))
