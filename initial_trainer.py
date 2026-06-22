@@ -1,13 +1,13 @@
-import gymnasium as gym
-
 from drift_env import DriftTrainEnv
 import typing as tt
 
 import numpy as np
 from stable_baselines3 import PPO
 
-def curriculum_learn(model_id: int):
-    epoch = 0
+import os
+
+def curriculum_learn(model_id: int, run_dir: str):
+    last_save_path = None
     for curr in range(10):
         print('Starting Curriculum: ', curr)
         configs, threshold = get_curriculum(curr)
@@ -19,17 +19,18 @@ def curriculum_learn(model_id: int):
                         gamma=1.00,
                         verbose=1)
         else:
-            model = PPO.load('data/checkpoints/safe_ppo_model_'+str(
-                model_id)+'_'+str(curr-1)+'_'+str(epoch),  env=env)
+            model = PPO.load(last_save_path, env=env)
         score = 0
         epoch = -1
         while score < threshold:
             epoch += 1
-            # TODO what happens if model diverges?
             model.learn(total_timesteps=25_000)
-            save_path = 'data/checkpoints/safe_ppo_model_'+str(
-                model_id)+'_'+str(curr)+'_'+str(epoch)
+            save_path = os.path.join(
+                run_dir,
+                f"safe_ppo_model_{curr}_{model_id}_{epoch}"
+            )
             model.save(save_path)
+            last_save_path = save_path
             score = test_model(save_path, curr)
             print('Saved Model: ', save_path, ' Score: ', score)
 
@@ -193,6 +194,34 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
     return configs, threshold
 
 if __name__ == "__main__":
-    model_id = 6
-    curriculum_learn(model_id)
-    # test_model('data/checkpoints/safe_ppo_model_5_9_2.zip', 9)
+
+    base_dir = os.path.dirname(__file__)
+
+    checkpoints_dir = os.path.join(
+        base_dir,
+        "data",
+        "checkpoints"
+    )
+    os.makedirs(checkpoints_dir, exist_ok=True)
+
+    run_num = 1
+    while os.path.exists(
+        os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
+    ):
+        run_num += 1
+
+    run_dir = os.path.join(
+        checkpoints_dir,
+        f"safe_PPO_{run_num}"
+    )
+    os.makedirs(run_dir, exist_ok=True)
+
+    model_id = run_num
+
+    print(f"\nSaving models to: {run_dir}")
+    print(f"Model ID: {model_id}\n")
+
+    curriculum_learn(model_id, run_dir)
+    
+    # To test a specific checkpoint after training:
+    # test_model(os.path.join('data', 'checkpoints', 'safe_PPO_6', 'safe_ppo_model_9_6_0.zip'), 9)

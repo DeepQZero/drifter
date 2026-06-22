@@ -1,0 +1,48 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# RL training data and checkpoints
+data/
+*.zip
+
+# Evaluation outputs
+saved_figures/
+saved_results/
+
+# Logs
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Matplotlib cache
+.matplotlib/
+
+# Model formats (future deployment artifacts)
+*.pt
+*.pth
+*.onnx
