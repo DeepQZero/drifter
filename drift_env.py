@@ -130,11 +130,19 @@ class SpaceCraftDockingEnv3D(gym.Env):
         """Computes new state."""
         dt = self.step_len if not drift else self.drift_step_len
         t_span = (self.time_step, self.time_step + dt)
-        result = solve_ivp(self.dynamics, t_span, self.state[0:6],
-                           args=(action,), method='RK45')
-        time_points, state_vectors = result.t, result.y
-        new_state = state_vectors[:, -1]
-        return np.concatenate([new_state, np.array([1+self.state[6]])])
+        result = solve_ivp(
+            self.dynamics,
+            t_span,
+            self.state[0:6],
+            args=(action,),
+            method='RK45',
+            rtol=1e-5,
+            atol=1e-8
+        )
+        if not result.success:
+            return self.state
+        new_state = result.y[:, -1]
+        return np.concatenate([new_state, np.array([1 + self.state[6]])])
 
     def dynamics(self, t, x, u):  # TODO type signature
         """Computes new state using CWH equations."""
@@ -267,8 +275,8 @@ class DriftTrainEnv(gym.Env):
 
 class DriftTestEnv(gym.Env):
     """
-        Wrapper for docking environment that looks ahead each time step to
-        determine if docking condition can be achieved by drifting.
+    Wrapper for docking environment that looks ahead each time step to
+    determine if docking condition can be achieved by drifting.
     """
     def __init__(self, **kwargs) -> None:
         self.env = SpaceCraftDockingEnv3D(**kwargs)
