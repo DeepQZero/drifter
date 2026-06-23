@@ -7,26 +7,26 @@ from stable_baselines3 import PPO
 import copy
 
 
-model_1 = PPO.load("data/checkpoints/safe_ppo_model_5_1_1.zip")
-model_2 = PPO.load("data/checkpoints/safe_ppo_model_5_3_2.zip")
-model_3 = PPO.load("data/checkpoints/safe_ppo_model_5_6_9.zip")
-model_4 = PPO.load("data/checkpoints/safe_ppo_model_5_9_2.zip")
-
+model_1 = PPO.load("data/checkpoints/safe_ppo_model_6_1_0.zip")
+model_2 = PPO.load("data/checkpoints/safe_ppo_model_6_3_4.zip")
+model_3 = PPO.load("data/checkpoints/safe_ppo_model_6_6_8.zip")
+model_4 = PPO.load("data/checkpoints/safe_ppo_model_6_7_1.zip")
+model_5 = PPO.load("data/checkpoints/safe_ppo_model_6_8_2.zip")
 
 fuels = []
 wins = []
 
 for i in range(100):
     print(i)
-    print('starting at model 4')
+    print('starting at model 5')
     epi_fuel = 0
     curriculum, _ = get_curriculum(10)
     env = DriftTestEnv(**curriculum)
 
     obs, info = env.reset()
     done = False
-    model_num = 4
-    model = model_4
+    model_num = 5
+    model = model_5
     # env.env.state[3] = 0.0
     # env.env.state[4] = 0.0
     # env.env.state[5] = 0.0
@@ -55,7 +55,12 @@ for i in range(100):
                 # env.env.state[3] = 0.0
                 # env.env.state[4] = 0.0
                 # env.env.state[5] = 0.0
-                if model_num == 3:
+                if model_num == 4:
+                    print('model 4')
+                    model = model_4
+                    env.env.dock_dist = 50
+                    env.env.dock_speed = 0.30
+                elif model_num == 3:
                     print('model 3')
                     model = model_3
                     env.env.dock_dist = 10
