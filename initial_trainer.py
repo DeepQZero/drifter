@@ -218,7 +218,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
 
     # Stage 1: slightly farther start and larger boundary.
     if curriculum >= 1:
-        threshold = 0.985
+        threshold = 0.98
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 50
         configs['max_boundary_box'] = 10
@@ -240,7 +240,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
 
     # Stage 3: longer lookahead and bigger space.
     if curriculum >= 3:
-        threshold = 0.985
+        threshold = 0.98
         configs['max_episode_len'] = 5
         configs['max_lookahead_len'] = 100
         configs['max_boundary_box'] = 30
@@ -254,7 +254,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
         threshold = 0.95
         configs['pos_thresh'] = 10
         configs['speed_thresh'] = 0.22
-        configs['max_episode_len'] = 5
+        configs['max_episode_len'] = 6
         configs['max_lookahead_len'] = 10
         configs['max_boundary_box'] = 50
         configs['min_init_pos_bound'] = 10
@@ -265,7 +265,7 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
     # Stage 5: longer lookahead, wider start range.
     if curriculum >= 5:
         threshold = 0.95
-        configs['max_episode_len'] = 5
+        configs['max_episode_len'] = 6
         configs['max_lookahead_len'] = 25
         configs['max_boundary_box'] = 40
         configs['min_init_pos_bound'] = 10
@@ -275,8 +275,8 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
 
     # Stage 6: even wider start range and boundary.
     if curriculum >= 6:
-        threshold = 0.985
-        configs['max_episode_len'] = 5
+        threshold = 0.98
+        configs['max_episode_len'] = 6
         configs['max_lookahead_len'] = 50
         configs['max_boundary_box'] = 60
         configs['min_init_pos_bound'] = 10
@@ -286,10 +286,10 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
 
     # Stage 7: long range start, wide docking target, higher speed allowed.
     if curriculum >= 7:
-        threshold = 0.985
+        threshold = 0.98
         configs['pos_thresh'] = 50
         configs['speed_thresh'] = 0.3
-        configs['max_episode_len'] = 5
+        configs['max_episode_len'] = 8
         configs['max_lookahead_len'] = 50
         configs['max_boundary_box'] = 110
         configs['min_init_pos_bound'] = 50
@@ -299,10 +299,10 @@ def get_curriculum(curriculum: int) -> tt.Tuple[dict, float]:
 
     # Stage 8: full range with very wide docking target.
     if curriculum >= 8:
-        threshold = 0.985
+        threshold = 0.98
         configs['pos_thresh'] = 100
         configs['speed_thresh'] = 0.4
-        configs['max_episode_len'] = 5
+        configs['max_episode_len'] = 10
         configs['max_lookahead_len'] = 50
         configs['max_boundary_box'] = 200
         configs['min_init_pos_bound'] = 100
