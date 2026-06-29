@@ -253,7 +253,7 @@ class DriftTrainEnv(gym.Env):
         """Standard Gymnasium step function."""
         obs, rew, term, trunc, info = self.env.step(action)
         done = term or trunc
-        if done and self.env.only_oot():   # not done or self.env....
+        if (not done) or (self.env.only_oot()):
             is_drift, the_time = self.det_drift()
             if is_drift:
                 rew += 10

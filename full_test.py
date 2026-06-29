@@ -40,16 +40,16 @@ CHECKPOINT_DIR = BASE_DIR / "data" / "checkpoints"
 # Each model was trained on a progressively harder range of starting distances.
 # Format: safe_ppo_model_{stage}_{run}_{epoch}.zip
 # Example: safe_ppo_model_6_1_0.zip -> stage 6, run 1, epoch 0
-model_1 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_5" /
-                       "safe_ppo_model_1_5_0.zip"))
-model_2 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_5" /
-                       "safe_ppo_model_3_5_3.zip"))
-model_3 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_5" /
-                       "safe_ppo_model_6_5_24.zip"))
-model_4 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_5" /
-                       "safe_ppo_model_7_5_6.zip"))
-model_5 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_5" /
-                       "safe_ppo_model_8_5_1.zip"))
+model_1 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_11" / 
+                       "safe_ppo_model_1_11_0.zip"))
+model_2 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_11" / 
+                       "safe_ppo_model_3_11_1.zip"))
+model_3 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_11" / 
+                       "safe_ppo_model_6_11_21.zip"))
+model_4 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_11" / 
+                       "safe_ppo_model_7_11_9.zip"))
+model_5 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_11" / 
+                       "safe_ppo_model_8_11_128.zip"))
 
 fuels = []  # total fuel used per episode
 wins = []   # 1 for a successful dock, 0 for a failure
@@ -76,6 +76,14 @@ for i in range(100):
     # env.env.state[5] = 0.0
 
     while not done:
+        # obs[:-1] *= np.random.uniform(0.99, 1.01, 1)
+
+        # Keep the timestep counter within the range seen during training.
+        # Each stage is generally trained with a small max_episode_len (6-10 steps),
+        # so the model may behave unexpectedly if state[6] goes beyond that.
+        if env.env.state[6] >= 10:
+            env.env.state[6] = 0
+
         if env.is_drifting:
             # During a drift period the agent holds position with zero thrust.
             action = np.array([0.0, 0.0, 0.0])

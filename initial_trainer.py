@@ -33,16 +33,23 @@ import time
 START_STAGE = 0
 RESUME_FROM = None  # example: r"data\checkpoints\safe_PPO_6\safe_ppo_model_7_6_1.zip"
 
+# Keep all checkpoints so training curves and graphs can be reconstructed later.
 # If True, every checkpoint from every epoch is kept on disk.
 # If False, only the final passing checkpoint per stage is kept.
-SAVE_ALL_EPOCHS = False
+SAVE_ALL_EPOCHS = True
+
+# Maximum number of training epochs per stage before moving on, even if the
+# score threshold has not been reached. Prevents a single stage from running
+# indefinitely if the model stops improving.
+MAX_EPOCHS_PER_STAGE = 10
 
 
 def curriculum_learn(model_id: int, run_dir: str):
     """Train a drift-assisted docking agent through a series of curriculum stages.
 
-    Each stage trains in a loop until the dock rate hits the stage threshold,
-    then moves to the next stage starting from the last saved checkpoint.
+    Each stage trains in a loop until the dock rate hits the stage threshold
+    or MAX_EPOCHS_PER_STAGE is reached, then moves to the next stage starting
+    from the last saved checkpoint.
 
     Args:
         model_id: Number used in checkpoint filenames to identify this run.
@@ -80,7 +87,7 @@ def curriculum_learn(model_id: int, run_dir: str):
         score = 0
         epoch = -1
         prev_save_path = None  # tracks the previous epoch's checkpoint for cleanup
-        while score < threshold:
+        while score < threshold and epoch < MAX_EPOCHS_PER_STAGE - 1:
             epoch += 1
             # TODO: what happens if model diverges?
             model.learn(total_timesteps=25_000)
@@ -105,6 +112,10 @@ def curriculum_learn(model_id: int, run_dir: str):
                     os.remove(zip_path)
 
             prev_save_path = save_path
+
+        if score < threshold:
+            print(f'Stage {curr} hit epoch cap ({MAX_EPOCHS_PER_STAGE}) '
+                  f'with score {score:.3f} < {threshold}. Moving on.')
 
         stage_time = time.time() - stage_start
         print(f'Stage {curr} done: {stage_timesteps:,} timesteps, '
@@ -366,3 +377,4 @@ if __name__ == "__main__":
 
     # To test a specific checkpoint after training:
     # test_model('data/checkpoints/safe_PPO_6/safe_ppo_model_6_7_1.zip', 7)
+    
