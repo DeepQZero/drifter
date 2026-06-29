@@ -25,11 +25,28 @@ Update the model paths at the top of the script to match your run folder
 before running.
 """
 
+import copy
 import numpy as np
 from pathlib import Path
 from drift_env import DriftTestEnv
 from initial_trainer import get_curriculum
 from stable_baselines3 import PPO
+
+
+def get_safe_action(env, action, obs):
+    action_list = []
+    action_list.append(action)
+    action_list.append(np.array([0.0, 0.0, 0.0]))
+    action_list.append(-1 * env.env.state[3:6])
+    for tmp_action in action_list:
+        tmp_env = copy.deepcopy(env)
+        tmp_env.env.state = obs
+        tmp_env.step(tmp_action)
+        if not tmp_env.env.is_unsafe():
+            return tmp_action
+    print('NO SAFE ACTION')
+    return action
+
 
 # Build the checkpoint path relative to this file so the script works
 # regardless of which directory it is launched from.
@@ -76,6 +93,10 @@ for i in range(100):
     # env.env.state[5] = 0.0
 
     while not done:
+        # obs[:-1] *= np.random.uniform(0.99, 1.01, 1)
+        if env.env.state[6] >= 10:
+            env.env.state[6] = 0
+
         if env.is_drifting:
             # During a drift period the agent holds position with zero thrust.
             action = np.array([0.0, 0.0, 0.0])
@@ -83,7 +104,10 @@ for i in range(100):
             # Slice obs to match the observation size the model was trained on.
             # Older models expect 6 elements; newer ones expect 7 (with timestep).
             expected_obs_size = model.observation_space.shape[0]
-            action = model.predict(obs[:expected_obs_size], deterministic=True)[0]
+            exp_action = model.predict(obs[:expected_obs_size],
+                                    deterministic=True)[0]
+            action = get_safe_action(env, exp_action, obs)  # TODO Check
+        action *= np.random.uniform(0.95, 1.05)
 
         # Accumulate fuel as the sum of absolute thrust across all axes,
         # divided by mass and multiplied by step length to get delta-V units.
