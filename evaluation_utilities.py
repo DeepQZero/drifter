@@ -9,13 +9,18 @@ instead of needing to be copied by hand into each script.
 
 Contents:
 1. extract_stage: reads the curriculum stage number from a checkpoint
-   filename.
+   filename. Handles both drift (safe_ppo_model_*) and nodrift
+   (nodrift_ppo_model_*) naming conventions.
 2. resolve_checkpoint_paths: finds checkpoint .zip files based on a simple
-   instruction like "latest" or "run:safe_PPO_6".
-3. patch_unsafe_termination: fixes episodes ending too early during
+   instruction like "latest" or "run:safe_PPO_6". Supports both checkpoint
+   families automatically.
+3. _find_checkpoints_in_folder: internal helper that searches a folder for
+   checkpoint files, trying drift, nodrift, and fallback patterns in order.
+4. patch_unsafe_termination: fixes episodes ending too early during
    evaluation because of a training-only safety rule.
-4. classify_failure: returns a short word describing why an episode
-   failed (for example, "crash" or "timeout").
+5. classify_failure: returns a short word describing why an episode
+   failed (for example, "crash" or "timeout"). For use with DriftTestEnv;
+   see classify_failure_nodrift in checkpoint_test.py for nodrift agents.
 """
 
 import glob
@@ -25,37 +30,56 @@ from numpy.linalg import norm as _norm
 
 
 def extract_stage(path):
-    """
-    Read the curriculum stage number out of a checkpoint filename.
+    """Read the curriculum stage number out of a checkpoint filename.
 
-    Filenames look like "safe_ppo_model_3_1.zip", meaning stage 3, run 1.
-    The pattern is safe_ppo_model_{stage}_{run}.zip, so this pulls out the
-    second-to-last number.
+    Handles two naming conventions used in this project:
+        safe_ppo_model_{stage}_{run}_{epoch}.zip
+        nodrift_ppo_model_{stage}_{run}_{epoch}.zip
+    In both current conventions, stage is the third-to-last number: parts[-3].
+
+    An older two-number drift format, safe_ppo_model_{stage}_{run}.zip
+    with no epoch, is also supported as a fallback: stage is parts[-2].
+
+    For other filenames like "final_model.zip" that have no stage number,
+    -1 is returned instead of crashing so the caller can decide how to
+    handle it.
 
     Args:
         path: Full file path to a checkpoint file.
 
     Returns:
         The stage number as an integer. Returns -1 if the filename does
-        not match the expected pattern, instead of crashing, so the
-        caller can check for that and raise a clear error if needed.
+        not match any expected pattern.
     """
     # Strip the folder path and the .zip ending, then split on "_".
-    # "safe_ppo_model_3_1.zip" becomes ["safe", "ppo", "model", "3", "1"]
+    # "safe_ppo_model_6_12_9.zip" -> ["safe", "ppo", "model", "6", "12", "9"]
+    # "nodrift_ppo_model_4_2_40.zip" -> ["nodrift", "ppo", "model", "4", "2", "40"]
     filename = os.path.basename(path).replace(".zip", "")
     parts = filename.split("_")
 
-    # The stage number is the second-to-last piece. Returning -1 instead
-    # of crashing lets the caller decide how to handle a bad filename.
+    # Current format for both drift and nodrift checkpoints includes an
+    # epoch number: {prefix}_model_{stage}_{run}_{epoch}. Stage is third
+    # from the end. This is checked first since it is the format currently 
+    # used by both initial_trainer.py and nodrift_initial_trainer.py.
+    try:
+        return int(parts[-3])
+    except (IndexError, ValueError):
+        pass
+
+    # Fallback for the older two-number drift format with no epoch:
+    # safe_ppo_model_{stage}_{run}.zip. Stage is second from the end.
+    # TODO: this fallback can probably be removed the old two-number
+    # checkpoints are no longer used.
     try:
         return int(parts[-2])
     except (IndexError, ValueError):
+        # Neither pattern matched. Return -1 instead of crashing so the
+        # caller can decide how to handle an incorrect filename.
         return -1
 
 
 def resolve_checkpoint_paths(checkpoint_spec, checkpoint_root, num_models=1):
-    """
-    Find checkpoint .zip files on disk based on a simple text instruction.
+    """Find checkpoint .zip files on disk based on a simple text instruction.
 
     Supported formats for checkpoint_spec:
         "latest"
@@ -76,10 +100,14 @@ def resolve_checkpoint_paths(checkpoint_spec, checkpoint_root, num_models=1):
         A direct folder path
             Returns checkpoints found inside that folder.
 
-    Every pattern below only matches files named like
-    "safe_ppo_model_{stage}_{run}.zip". This project also has a second,
-    unrelated checkpoint style named like "drifter_ppo_100000_steps.zip",
-    which has no stage number or curriculum.
+    When searching a folder, this function tries three glob patterns in
+    order and uses the first one that finds anything:
+        1. safe_ppo_model_*.zip     (drift curriculum checkpoints)
+        2. nodrift_ppo_model_*.zip  (nodrift curriculum checkpoints)
+        3. *.zip                    (fallback, catches final_model.zip etc.)
+
+    This keeps drift and nodrift checkpoint families from being mixed
+    together within one search, while still supporting both.
 
     Args:
         checkpoint_spec: A string describing which checkpoints to find.
@@ -92,8 +120,8 @@ def resolve_checkpoint_paths(checkpoint_spec, checkpoint_root, num_models=1):
         A list of file paths, sorted from lowest to highest stage.
 
     Raises:
-        FileNotFoundError: if no matching files could be found.
-        ValueError: if checkpoint_spec does not match a supported format.
+        FileNotFoundError: If no matching files could be found.
+        ValueError: If checkpoint_spec does not match a supported format.
     """
 
     # Case 1: a direct path to one file.
@@ -102,15 +130,14 @@ def resolve_checkpoint_paths(checkpoint_spec, checkpoint_root, num_models=1):
 
     # Case 2: a direct path to a folder. Search inside it.
     if os.path.isdir(checkpoint_spec):
-        search_pattern = os.path.join(checkpoint_spec, "safe_ppo_model_*.zip")
-        matching_files = glob.glob(search_pattern)
+        matching_files = _find_checkpoints_in_folder(checkpoint_spec)
 
         if not matching_files:
             raise FileNotFoundError(
                 f"No checkpoint .zip files found in directory: {checkpoint_spec}"
             )
 
-        # Sort by stage number, not filename text, so "10" doesn't sort
+        # Sort by stage number, not filename text, so "10" does not sort
         # before "2".
         matching_files = sorted(matching_files, key=extract_stage)
         return matching_files[-num_models:]
@@ -128,12 +155,11 @@ def resolve_checkpoint_paths(checkpoint_spec, checkpoint_root, num_models=1):
             )
 
         most_recent_folder = max(run_folders, key=os.path.getmtime)
-        search_pattern = os.path.join(most_recent_folder, "safe_ppo_model_*.zip")
-        matching_files = glob.glob(search_pattern)
+        matching_files = _find_checkpoints_in_folder(most_recent_folder)
 
         if not matching_files:
             raise FileNotFoundError(
-                f"No curriculum checkpoints found in {most_recent_folder}"
+                f"No checkpoints found in {most_recent_folder}"
             )
 
         matching_files = sorted(matching_files, key=extract_stage)
@@ -142,10 +168,8 @@ def resolve_checkpoint_paths(checkpoint_spec, checkpoint_root, num_models=1):
     # Case 4: "run:safe_PPO_6", one exact run folder picked by name.
     if checkpoint_spec.startswith("run:"):
         run_folder_name = checkpoint_spec.split("run:")[1]
-        search_pattern = os.path.join(
-            checkpoint_root, run_folder_name, "safe_ppo_model_*.zip"
-        )
-        matching_files = glob.glob(search_pattern)
+        run_folder_path = os.path.join(checkpoint_root, run_folder_name)
+        matching_files = _find_checkpoints_in_folder(run_folder_path)
         matching_files = sorted(matching_files, key=extract_stage)
         return matching_files[-num_models:]
 
@@ -161,9 +185,82 @@ def resolve_checkpoint_paths(checkpoint_spec, checkpoint_root, num_models=1):
     raise ValueError(f"Invalid checkpoint spec: {checkpoint_spec}")
 
 
-def patch_unsafe_termination(env):
+def _find_checkpoints_in_folder(folder):
+    """Search a single folder for checkpoint .zip files.
+
+    Tries three glob patterns in order and uses the first one that finds
+    anything. If multiple checkpoints exist for the same stage (for
+    example when SAVE_ALL_EPOCHS is True during training), only the
+    checkpoint with the highest epoch number is kept for each stage.
+
+    Pattern priority:
+        1. safe_ppo_model_*.zip     (drift curriculum checkpoints)
+        2. nodrift_ppo_model_*.zip  (nodrift curriculum checkpoints)
+        3. *.zip                    (fallback for final_model.zip etc.)
+
+    Args:
+        folder: Path to the folder to search.
+
+    Returns:
+        A list of matching file paths, one per stage. Returns an empty
+        list if nothing is found rather than raising an error; the
+        caller decides whether an empty result is an error.
     """
-    Turn off an early-termination rule meant for training, not evaluation.
+    # Try each pattern in order. The "or" chaining means we only fall
+    # through to the next pattern if the previous one found nothing.
+    files = (
+        glob.glob(os.path.join(folder, "safe_ppo_model_*.zip")) or
+        glob.glob(os.path.join(folder, "nodrift_ppo_model_*.zip")) or
+        glob.glob(os.path.join(folder, "*.zip"))
+    )
+
+    if not files:
+        return []
+
+    # Group every checkpoint file by its stage number. A training run
+    # with SAVE_ALL_EPOCHS = True can leave many files for the same
+    # stage, one per epoch, so we collect them all first before picking
+    # the best one for each stage.
+    stage_to_files = {}
+    for f in files:
+        stage = extract_stage(f)
+        if stage not in stage_to_files:
+            stage_to_files[stage] = []
+        stage_to_files[stage].append(f)
+
+    # For each stage, keep only the checkpoint with the highest epoch
+    # number. The epoch is the last number in the filename, for example
+    # the "9" in "safe_ppo_model_6_12_9.zip".
+    deduplicated = []
+    for stage, stage_files in stage_to_files.items():
+
+        def get_epoch(path):
+            """Read the epoch number from a checkpoint filename.
+
+            Args:
+                path: Full file path to a checkpoint file.
+
+            Returns:
+                The epoch number as an integer. Returns 0 if the
+                filename has no epoch number, so it sorts first
+                rather than crashing the comparison.
+            """
+            name = os.path.basename(path).replace(".zip", "")
+            parts = name.split("_")
+            try:
+                return int(parts[-1])
+            except (IndexError, ValueError):
+                return 0
+
+        # Sort the files for this stage by epoch number and keep the
+        # last one, which has the highest epoch.
+        deduplicated.append(sorted(stage_files, key=get_epoch)[-1])
+
+    return deduplicated
+
+
+def patch_unsafe_termination(env):
+    """Turn off an early-termination rule meant for training, not evaluation.
 
     drift_env.py's rewards() function normally ends an episode the moment
     the spacecraft's speed goes above a limit:
@@ -197,7 +294,16 @@ def patch_unsafe_termination(env):
 
     def _patched_rewards(last_state):
         """Same as drift_env.py's real rewards(), minus the speed-based
-        early termination and its "UNSAFE!" print."""
+        early termination and its "UNSAFE!" print.
+
+        Args:
+            last_state: The state from before this step, used to
+                compute the change in distance.
+
+        Returns:
+            A tuple of (reward, terminated, truncated), same as the
+            original rewards() function.
+        """
         tot_step_rew = 0
 
         current_distance = float(_norm(inner_env.state[0:3]))
@@ -226,7 +332,9 @@ def patch_unsafe_termination(env):
             elif out_of_bounds or out_of_fuel or out_of_time:
                 tot_step_rew += -1
 
-            prox_penalty = inner_env.proximity_penalty_coeff * (
+            # Penalize moving away from the chief, same as the real
+            # rewards() function.
+            prox_penalty = inner_env.dist_coeff * (
                 current_distance - prev_distance
             )
             tot_step_rew += prox_penalty + inner_env.time_penalty
@@ -242,11 +350,15 @@ def patch_unsafe_termination(env):
 
 
 def classify_failure(env):
-    """
-    Figure out why an episode ended without docking successfully.
+    """Figure out why an episode ended without docking successfully.
 
     Call this right after an episode ends, while the environment still
     holds the final state of that episode.
+
+    Works with DriftTestEnv, where the inner environment is accessed
+    via env.env. For nodrift (SpaceCraftDockingEnv3D) environments,
+    use classify_failure_nodrift in checkpoint_test.py instead, since
+    there is no env.env wrapper layer.
 
     Args:
         env: A DriftTestEnv (or similar) object, in the state it was in

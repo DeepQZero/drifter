@@ -35,7 +35,7 @@ SEED = 0
 np.random.seed(SEED)
 
 # How many curriculum-stage checkpoints to chain together in one episode.
-NUM_MODELS = 4
+NUM_MODELS = 5
 
 # Set to True to print position and velocity norms at each step, plus
 # which model the episode started on and every stage switch.
@@ -50,7 +50,7 @@ num_eval_episodes = 10
 # "data/checkpoints/safe_PPO_6"     -> newest .zip in this folder
 # "pattern:safe_ppo_model_*_6.zip"  -> custom glob inside the checkpoint root
 # r"C:\...\checkpoint.zip"          -> exact path to one checkpoint file
-CHECKPOINT = "latest"
+CHECKPOINT = "run:safe_PPO_12"
 
 # Root folder that contains saved model checkpoints.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -173,12 +173,12 @@ for i in range(num_eval_episodes):
         # During drift, or during selected time windows, apply zero
         # thrust. This makes the evaluation behavior match the intended
         # test policy.
-        if env.is_drifting or (t_step % 4) in list(range(5, 10)):  # TODO
-            # If you took 5 actions, then drift for 5 actions, then repeat.
+        if env.is_drifting:
             action = np.array([0.0, 0.0, 0.0])
         else:
             # Ask the current model for the next action.
-            action = models[model_num - 1].predict(obs, deterministic=True)[0]
+            expected_obs_size = models[model_num - 1].observation_space.shape[0]
+            action = models[model_num - 1].predict(obs[:expected_obs_size], deterministic=True)[0]
 
         # Track total fuel by accumulating the action magnitude.
         epi_fuel += np.linalg.norm(action)
