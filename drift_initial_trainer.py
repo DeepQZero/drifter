@@ -1,5 +1,5 @@
 """
-initial_trainer.py
+drift_initial_trainer.py
 
 Curriculum training script for the drift-assisted docking agent (Drifter-Learn).
 
@@ -15,8 +15,8 @@ test_model() is also called during training to measure dock rate after each
 save. It can also be called standalone from __main__ to evaluate a specific
 checkpoint without running a full training session.
 
-Checkpoint naming format: safe_ppo_model_{stage}_{run}_{epoch}.zip
-Example: safe_ppo_model_6_1_0.zip -> stage 6, run 1, epoch 0
+Checkpoint naming format: safe_ppo_model_{run}_{stage}_{epoch}.zip
+Example: safe_ppo_model_1_6_0.zip -> run 1, stage 6, epoch 0
 """
 
 from drift_env import DriftTrainEnv
@@ -31,17 +31,27 @@ import time
 # Set START_STAGE to a higher number and RESUME_FROM to a checkpoint path
 # to resume training from a specific stage without redoing earlier ones.
 START_STAGE = 0
-RESUME_FROM = None  # example: r"data\checkpoints\safe_PPO_6\safe_ppo_model_7_6_1.zip"
+RESUME_FROM = None  # example: r"data\checkpoints\safe_PPO_6\safe_ppo_model_6_7_1.zip"
 
-# Keep all checkpoints so training curves and graphs can be reconstructed later.
-# If True, every checkpoint from every epoch is kept on disk.
-# If False, only the final passing checkpoint per stage is kept.
+# True: keep all checkpoints so training curves and graphs can be reconstructed later.
+# False: keep only the final passing checkpoint per stage.
 SAVE_ALL_EPOCHS = True
 
 # Maximum number of training epochs per stage before moving on, even if the
 # score threshold has not been reached. Prevents a single stage from running
 # indefinitely if the model stops improving.
 MAX_EPOCHS_PER_STAGE = 10
+
+# Set a specific run number to use for this training run, for example 13.
+# Useful for running two versions side by side for a paper (e.g. 13 vs 14)
+# or for naming a run something memorable for an ablation.
+# Set to None to auto-increment from the highest existing safe_PPO_<N> folder.
+MANUAL_RUN_ID = None  # example: 13
+
+# True: refuse to run when MANUAL_RUN_ID already exists on disk.
+# False: allow overwriting the existing MANUAL_RUN_ID folder.
+# Only applies when MANUAL_RUN_ID is set.
+PREVENT_OVERWRITE = True
 
 
 def curriculum_learn(model_id: int, run_dir: str):
@@ -63,7 +73,7 @@ def curriculum_learn(model_id: int, run_dir: str):
     run_start = time.time()
 
     for curr in range(START_STAGE, 10):
-        print('Starting Curriculum: ', curr)
+        print(f'\nStarting stage {curr}')
         stage_start = time.time()
         stage_timesteps = 0
 
@@ -87,6 +97,7 @@ def curriculum_learn(model_id: int, run_dir: str):
         score = 0
         epoch = -1
         prev_save_path = None  # tracks the previous epoch's checkpoint for cleanup
+
         while score < threshold and epoch < MAX_EPOCHS_PER_STAGE - 1:
             epoch += 1
             # TODO: what happens if model diverges?
@@ -96,12 +107,14 @@ def curriculum_learn(model_id: int, run_dir: str):
 
             save_path = os.path.join(
                 run_dir,
-                f"safe_ppo_model_{curr}_{model_id}_{epoch}"
+                f"safe_ppo_model_{model_id}_{curr}_{epoch}"
             )
             model.save(save_path)
             last_save_path = save_path
             score = test_model(save_path, curr)
-            print('Saved Model: ', save_path, ' Score: ', score)
+
+            save_name = os.path.basename(save_path)
+            print(f"  Epoch {epoch}: dock rate {score:.5f} ({100*score:.1f}%)  |  {save_name}")
 
             # If SAVE_ALL_EPOCHS is off, delete the previous epoch's checkpoint
             # now that we have a newer one. The final passing checkpoint is
@@ -114,16 +127,30 @@ def curriculum_learn(model_id: int, run_dir: str):
             prev_save_path = save_path
 
         if score < threshold:
-            print(f'Stage {curr} hit epoch cap ({MAX_EPOCHS_PER_STAGE}) '
-                  f'with score {score:.3f} < {threshold}. Moving on.')
+            is_last_stage = (curr == 9)
+            status = "Training complete for final stage" if is_last_stage else "Moving on to next stage"
+            print(f"  Stage {curr} hit epoch limit ({MAX_EPOCHS_PER_STAGE}) "
+                  f"with dock rate {score:.5f} ({100*score:.1f}%). {status}.")
+        
+        stage_elapsed = time.time() - stage_start
+        stage_min = int(stage_elapsed // 60)
+        stage_sec = int(stage_elapsed % 60)
+        stage_hrs = stage_elapsed / 3600
+        print(f"Stage {curr} complete: {stage_timesteps:,} timesteps, "
+              f"{stage_min} min {stage_sec} sec ({stage_hrs:.2f} hrs)")
 
-        stage_time = time.time() - stage_start
-        print(f'Stage {curr} done: {stage_timesteps:,} timesteps, '
-              f'{stage_time / 60:.1f} min')
-
-    total_time = time.time() - run_start
-    print(f'Training complete: {total_timesteps:,} total timesteps, '
-          f'{total_time / 60:.1f} min total')
+    total_elapsed = time.time() - run_start
+    total_min = int(total_elapsed // 60)
+    total_sec = int(total_elapsed % 60)
+    total_hrs = total_elapsed / 3600
+    stages_run = curr - START_STAGE + 1
+    avg_elapsed = total_elapsed / max(1, stages_run)
+    avg_min = int(avg_elapsed // 60)
+    avg_sec = int(avg_elapsed % 60)
+    print(f"\nTraining complete")
+    print(f"  Total timesteps: {total_timesteps:,}")
+    print(f"  Total time:      {total_min} min {total_sec} sec ({total_hrs:.2f} hrs)")
+    print(f"  Avg per stage:   {avg_min} min {avg_sec} sec")
 
 
 def test_model(path: str, curriculum: int) -> float:
@@ -156,6 +183,7 @@ def test_model(path: str, curriculum: int) -> float:
             action = model.predict(obs, deterministic=True)[0]
             obs, reward, term, trunc, info = env.step(action)
             epi_reward += reward
+            # Fuel (delta-V): force magnitude / mass * step length, in m/s.
             epi_fuel += np.linalg.norm(action) / env.env.m * env.env.step_len
             is_drift, _ = env.det_drift()
             done = term or trunc or is_drift
@@ -169,11 +197,11 @@ def test_model(path: str, curriculum: int) -> float:
                 all_rews.append(epi_reward)
                 all_fuels.append(epi_fuel)
 
-    print('Model Stats for Curriculum:', curriculum)
-    print('Dock: ', np.mean(all_docks),
-          'Reward: ', np.mean(all_rews),
-          'Fuel: ', np.mean(all_fuels), np.median(all_fuels)
-          )
+    print(f"  Model stats for stage {curriculum}:")
+    print(f"    Dock rate:    {np.mean(all_docks):.5f} ({100*np.mean(all_docks):.1f}%)")
+    print(f"    Mean reward:  {np.mean(all_rews):.5f}")
+    print(f"    Fuel (delta-V):  mean {np.mean(all_fuels):.5f} m/s  "
+          f"median {np.median(all_fuels):.5f} m/s")
     return float(np.mean(all_docks))
 
 
@@ -357,17 +385,28 @@ if __name__ == "__main__":
     )
     os.makedirs(checkpoints_dir, exist_ok=True)
 
-    # Find the next available run number so old checkpoints are not overwritten.
-    run_num = 1
-    while os.path.exists(
-        os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
-    ):
-        run_num += 1
+    if MANUAL_RUN_ID is not None:
+        # Use the run number set in MANUAL_RUN_ID instead of auto-incrementing.
+        # Useful for running paired experiments with predictable IDs, e.g.
+        # safe_PPO_13 as a baseline and safe_PPO_14 as an ablation.
+        run_num = MANUAL_RUN_ID
+        run_dir = os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
 
-    run_dir = os.path.join(
-        checkpoints_dir,
-        f"safe_PPO_{run_num}"
-    )
+        if PREVENT_OVERWRITE and os.path.exists(run_dir):
+            raise FileExistsError(
+                f"safe_PPO_{run_num} already exists at {run_dir}. "
+                f"Set PREVENT_OVERWRITE = False to overwrite it, or choose "
+                f"a different MANUAL_RUN_ID."
+            )
+    else:
+        # Find the next available run number so old checkpoints are not overwritten.
+        run_num = 1
+        while os.path.exists(
+            os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
+        ):
+            run_num += 1
+        run_dir = os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
+
     os.makedirs(run_dir, exist_ok=True)
     model_id = run_num
 
@@ -377,4 +416,3 @@ if __name__ == "__main__":
 
     # To test a specific checkpoint after training:
     # test_model('data/checkpoints/safe_PPO_6/safe_ppo_model_6_7_1.zip', 7)
-    

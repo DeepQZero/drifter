@@ -69,10 +69,10 @@ class SpaceCraftDockingEnv3D(gym.Env):
         self.fuel_used = fuel_used
         self.time_step = time_step
 
-        self.n = 0.001027          # mean motion of chief orbit (rad/s)
-        self.m = 12                # deputy mass (kg)
-        self.time_penalty = -0.005  # TODO originally 0.0005
-        self.dist_coeff = -0.005  # TODO originally 0.0005
+        self.n = 0.001027         # mean motion of chief orbit (rad/s)
+        self.m = 12               # deputy mass (kg)
+        self.time_penalty = -0.005
+        self.dist_coeff = -0.01   # increased from -0.005 for stronger approach signal
         self.vel_penalty_coeff = -0.0075
 
         self.action_space = spaces.Box(
@@ -246,16 +246,18 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
             current_distance = float(vec_norm(self.state[0:3]))
             prev_distance = float(vec_norm(last_state[0:3]))
-
-            # Penalize moving away from the chief.
-            prox_penalty = self.dist_coeff * (current_distance - prev_distance)
-
-            # Penalize exceeding the speed limit; zero penalty if within limit.
+            # Positive reward for closing distance, negative for opening it.
+            # Sign is flipped vs the original penalty formulation to give a
+            # stronger gradient signal toward the target at long range.
+            approach_reward = self.dist_coeff * (prev_distance - current_distance)
+            # Speed penalty scaled by proximity so the agent can accelerate
+            # freely at long range and only needs precise speed control close
+            # to the target. Full penalty applies only within 10m.
             current_speed = float(vec_norm(self.state[3:6]))
             speed_limit = 0.2 + (2 * self.n) * current_distance
-            vel_penalty = self.vel_penalty_coeff * max(current_speed - speed_limit, 0)
-
-            tot_step_rew += vel_penalty + prox_penalty + self.time_penalty
+            approach_factor = min(1.0, 10.0 / max(current_distance, 1.0))
+            vel_penalty = self.vel_penalty_coeff * max(current_speed - speed_limit, 0) * approach_factor
+            tot_step_rew += vel_penalty + approach_reward + self.time_penalty
 
         return tot_step_rew, term, trunc
 

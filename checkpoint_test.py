@@ -11,11 +11,39 @@ evaluation_utilities.py.
 
 Supports both drift-assisted and direct-docking (nodrift) checkpoints.
 Set AGENT_MODE below to match the model being evaluated.
+
+IMPORTANT - Understanding this script's limitations:
+  This script evaluates ONE stage in isolation using that stage's own
+  training environment config. For drift agents, many stages were trained
+  with a very short max_episode_len (5-10 steps) and a wide docking
+  threshold (pos_thresh), so the lookahead detects a drift opportunity
+  almost immediately without meaningful travel. This is expected behavior
+  for a single stage; it is not a bug or a sign the agent is underperforming.
+
+  For a complete, mission-level evaluation of the drift agent, use
+  drift_full_test.py instead, which chains all five stage models together
+  into a single continuous episode from 100-150m starting range down to
+  the final 0.5m dock.
+
+  checkpoint_test.py is best used as a diagnostic tool to confirm that a
+  specific stage checkpoint behaves correctly in its own training environment.
+  It is also useful for nodrift agents, which have long episodes and produce
+  visually interesting trajectories even at a single stage.
+
+FUEL NOTE:
+  Fuel reported here is raw action magnitude accumulated as
+  sum(linalg.norm(action)) across all steps. This is NOT delta-V.
+  To convert to delta-V (m/s), divide by mass (12 kg) and multiply by
+  step length (1 s): delta_V = fuel_here / 12.
+  drift_full_test.py reports true delta-V directly and should be used
+  for fuel comparisons between drift and nodrift agents.
 """
 
 import os
 import json
 import argparse
+import contextlib
+import io
 from datetime import datetime
 
 import numpy as np
@@ -35,43 +63,54 @@ from evaluation_utilities import (
 AGENT_MODE = "auto"
 
 # CHECKPOINT CONFIG
-# "latest"                          -> newest .zip in the most recent run folder
-# "run:safe_PPO_6"                  -> newest .zip inside run folder safe_PPO_6
-# "data/checkpoints/safe_PPO_6"     -> newest .zip in this folder
-# "pattern:safe_ppo_model_*_6.zip"  -> custom glob inside the checkpoint root
-# r"C:\...\checkpoint.zip"          -> exact path to one checkpoint file
-CHECKPOINT = "latest"
+# "latest"                            -> newest .zip in the most recent run folder
+# "run:nodrift_curriculum_PPO_13"     -> newest .zip inside that exact run folder
+# "data/checkpoints/safe_PPO_14"      -> newest .zip in this folder
+# "pattern:safe_ppo_model_*_6_*.zip"  -> custom glob inside the checkpoint root, matches stage 6
+# r"C:\...\checkpoint.zip"            -> exact path to one checkpoint file
+#
+# The default below points at the current nodrift curriculum run in this
+# workspace. Change the run folder name, use "latest", or provide an exact
+# path to evaluate a different checkpoint.
+CHECKPOINT = "run:nodrift_curriculum_PPO_13"
 
-NUM_EPISODES = 10
+NUM_EPISODES = 25
 
 # ENV_CONFIG sets the evaluation environment parameters.
 # These should match the curriculum stage the model was trained on.
-#
-# Drift stage 9 example (safe_ppo_model_9_*):
-#   pos_thresh = 0.5, speed_thresh = 0.3
+# See drift_initial_trainer.py or nodrift_initial_trainer.py get_curriculum()
+# for the exact values used at each stage.
+
+# Drift stage 6 example (safe_ppo_model_{run}_6_{epoch}):
+#   pos_thresh = 10, speed_thresh = 0.22
+#   min/max_init_pos_bound = 10 / 50
+#   max_init_vel_bound = 0.3, max_boundary_box = 60
+#   max_episode_len = 6, max_lookahead_len = 50, drift_step_len = 10
+
+# Drift stage 8 example (safe_ppo_model_{run}_8_{epoch}):
+#   pos_thresh = 100, speed_thresh = 0.4
 #   min/max_init_pos_bound = 100 / 150
 #   max_init_vel_bound = 0.5, max_boundary_box = 200
-#
-# Nodrift stage 4 example (nodrift_ppo_model_4_*):
+#   max_episode_len = 10, max_lookahead_len = 50, drift_step_len = 10
+
+# Nodrift stage 4 example (nodrift_ppo_model_{run}_4_{epoch}):
 #   pos_thresh = 10, speed_thresh = 0.22
 #   min/max_init_pos_bound = 20 / 75
 #   max_init_vel_bound = 0.4, max_boundary_box = 120
-#
-# Nodrift stage 5 example (nodrift_ppo_model_5_*):
-#   pos_thresh = 0.5, speed_thresh = 0.2
-#   min/max_init_pos_bound = 75 / 150
-#   max_init_vel_bound = 0.5, max_boundary_box = 200
+#   max_episode_len = 500 (no drift keys)
 ENV_CONFIG = {
     "min_init_pos_bound": 2.5,
-    "max_init_pos_bound": 10,
-    "max_init_vel_bound": 0.2,
-    "max_boundary_box": 30,
-    "max_episode_len": 5,
+    "max_init_pos_bound": 20,
+    "max_init_vel_bound": 0.3,
+    "max_boundary_box": 50,
+    "max_episode_len": 250,
     "pos_thresh": 2.5,
     "speed_thresh": 0.2,
-    "max_total_dv": 1000,
-    "drift_step_len": 1,
+    "max_total_dv": 2500,
 }
+
+# Used only for the approximate delta-V conversion in this diagnostic script.
+SPACECRAFT_MASS_KG = 12
 
 # Folder this script lives in, used to build paths to checkpoints,
 # saved figures, and saved results regardless of where the script is
@@ -92,7 +131,6 @@ def detect_agent_mode(model_path: str) -> str:
     Returns:
         "nodrift" if the path contains "nodrift", otherwise "drift".
     """
-    # Check both the filename and the parent folder name.
     path_lower = model_path.lower()
     if "nodrift" in path_lower:
         return "nodrift"
@@ -137,19 +175,18 @@ def check_win(env, mode: str) -> tuple[bool, str]:
         "direct_dock", "drift_success", "crash", "out_of_bounds",
         "fuel", "timeout", or "unknown".
     """
-    # Check for a direct dock first, works for both modes.
+    # Access the inner environment directly for nodrift (no wrapper layer).
     inner_env = env.env if mode == "drift" else env
     if inner_env.is_docked():
         return True, "direct_dock"
 
-    # Drift agents can also win by reaching a position where drifting
-    # to the dock is possible. Nodrift agents cannot.
+    # Drift agents can also win by reaching a position where coasting
+    # to the dock is possible. Nodrift agents must dock directly.
     if mode == "drift":
         is_drift, _ = env.det_drift()
         if is_drift:
             return True, "drift_success"
 
-    # If neither condition is met, classify the failure reason.
     reason = classify_failure(env) if mode == "drift" else classify_failure_nodrift(env)
     return False, reason
 
@@ -219,20 +256,26 @@ def get_next_figure_number(save_dir: str) -> int:
     return max(numbers) + 1 if numbers else 1
 
 
-def plot_trajectories(all_trajectories, outcomes, model_name, model_path_global):
+def plot_trajectories(trajectories, episode_outcomes, model_name, model_path, num_episodes):
     """Plot 3D trajectories colored by outcome and save the figure to disk.
 
     Blue trajectories are wins (direct dock or drift success), red
     trajectories are losses (crash, timeout, out of bounds, out of fuel).
 
+    Note: trajectories from single-stage drift evaluation are typically
+    very short (5-10 steps) and show minimal movement because the drift
+    lookahead works almost immediately. Use drift_full_test.py for
+    trajectories that show a full long-range approach.
+
     Args:
-        all_trajectories: One trajectory per episode. Each trajectory is
+        trajectories: One trajectory per episode. Each trajectory is
             a list of (x, y, z) positions over time.
-        outcomes: One outcome string per episode, in the same order as
-            all_trajectories.
+        episode_outcomes: One outcome string per episode, in the same
+            order as trajectories.
         model_name: Display name of the model, used in the title.
-        model_path_global: Full path to the model file, used to label
-            which run folder this plot came from.
+        model_path: Full path to the model file, used to label which run
+            folder this plot came from.
+        num_episodes: Total number of episodes run, used in the title.
     """
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111, projection="3d")
@@ -243,9 +286,10 @@ def plot_trajectories(all_trajectories, outcomes, model_name, model_path_global)
 
     win_plotted = loss_plotted = False
 
-    for trajectory, outcome in zip(all_trajectories, outcomes):
+    for trajectory, outcome in zip(trajectories, episode_outcomes):
         traj = np.array(trajectory)
 
+        # Pad single-point trajectories so matplotlib can draw them.
         if len(traj) < 2:
             traj = np.vstack([traj[0], traj[0] + 1e-6])
 
@@ -261,18 +305,26 @@ def plot_trajectories(all_trajectories, outcomes, model_name, model_path_global)
 
         ax.plot(traj[:, 0], traj[:, 1], traj[:, 2],
                 color=color, linewidth=1.5, alpha=0.55, label=label)
-        ax.scatter(*traj[0], color=color, s=15, alpha=0.8)
+        ax.scatter(*traj[0], color=color, s=15, alpha=0.8)  # mark start position
 
     ax.scatter(0, 0, 0, marker="x", color="black", s=120, linewidths=2.5,
                zorder=5, label="Chief (target)")
 
+    # Force equal and symmetric axis ranges so the chief sits at the center.
+    all_points = np.concatenate([np.array(t) for t in trajectories if len(t) > 0])
+    max_extent = np.max(np.abs(all_points))
+    ax.set_xlim(-max_extent, max_extent)
+    ax.set_ylim(-max_extent, max_extent)
+    ax.set_zlim(-max_extent, max_extent)
+
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
     ax.set_zlabel("Z (m)")
-    run_folder = os.path.basename(os.path.dirname(model_path_global))
+    run_folder = os.path.basename(os.path.dirname(model_path))
+    wins_count = sum(1 for o in episode_outcomes if o in ("direct_dock", "drift_success"))
     ax.set_title(
-        f"Drifter Trajectories - {len(all_trajectories)} Episodes\n"
-        f"{run_folder}/{model_name}"
+        f"Checkpoint Trajectories - {run_folder}/{model_name}\n"
+        f"{num_episodes} Episodes, Win rate: {wins_count}/{num_episodes}"
     )
     ax.legend(loc="upper left")
     plt.tight_layout()
@@ -315,15 +367,14 @@ def evaluate_model(fix_unsafe: bool = True):
     # Models trained before the 7-element state update expect 6 elements.
     expected_obs_size = model.observation_space.shape[0]
 
-    # The unsafe termination patch only applies to drift agents.
-    # Nodrift agents do not use the is_unsafe() termination condition.
     if fix_unsafe and mode == "drift":
+        # During evaluation, ignore the training-only unsafe termination
+        # rule so checkpoints are judged on docking performance instead.
         patch_unsafe_termination(env)
 
     wins = 0
     direct_docks = 0
     drift_wins = 0
-
     failure_counts = {
         "crash": 0, "out_of_bounds": 0, "fuel": 0, "timeout": 0, "unknown": 0
     }
@@ -332,37 +383,42 @@ def evaluate_model(fix_unsafe: bool = True):
     timesteps = []
     start_dists = []
     end_dists = []
-    all_trajectories = []
-    outcomes = []
+    trajectories = []
+    episode_outcomes = []
 
+    # |a| sum = raw action magnitude sum, not delta-V. See FUEL NOTE in docstring.
     print(
         f"{'Ep':>4}  {'Start':>8}  {'End':>8}  {'Delta':>8}  "
-        f"{'Steps':>6}  {'Fuel':>8}  {'Fuel/Step':>10}  Result"
+        f"{'Steps':>6}  {'|a| sum':>9}  {'|a|/step':>10}  Result"
     )
+    # Table header separator.
     print("-" * 75)
 
     for episode in range(NUM_EPISODES):
         obs, _ = env.reset()
-
         done = False
         episode_steps = 0
-        episode_fuel = 0
+        episode_action_magnitude = 0
         trajectory = [obs[:3].copy()]
-
-        start_dist = np.linalg.norm(obs[:3])
+        start_distance = np.linalg.norm(obs[:3])
 
         while not done:
             action, _ = model.predict(obs[:expected_obs_size], deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
+
+            # Suppress environment prints (WIN!, UNSAFE!) so only this
+            # script's own per-episode result line is shown.
+            with contextlib.redirect_stdout(io.StringIO()):
+                obs, reward, terminated, truncated, info = env.step(action)
 
             trajectory.append(obs[:3].copy())
-            episode_fuel += np.linalg.norm(action)
+            # Raw action magnitude, not delta-V. Divide by 12 for delta-V.
+            episode_action_magnitude += np.linalg.norm(action)
             episode_steps += 1
             done = terminated or truncated
 
-        end_dist = np.linalg.norm(obs[:3])
-
+        end_distance = np.linalg.norm(obs[:3])
         is_win, outcome = check_win(env, mode)
+
         if is_win:
             wins += 1
             if outcome == "direct_dock":
@@ -372,26 +428,26 @@ def evaluate_model(fix_unsafe: bool = True):
         else:
             failure_counts[outcome] += 1
 
-        delta = end_dist - start_dist
-        fuel_per_step = episode_fuel / episode_steps if episode_steps > 0 else 0.0
+        distance_delta = end_distance - start_distance
+        action_magnitude_per_step = (
+            episode_action_magnitude / episode_steps if episode_steps > 0 else 0.0
+        )
         print(
-            f"{episode+1:>4}  {start_dist:>8.2f}  {end_dist:>8.2f}  {delta:>+8.2f}  "
-            f"{episode_steps:>6}  {episode_fuel:>8.3f}  {fuel_per_step:>8.4f}  "
+            f"{episode+1:>4}  {start_distance:>8.2f}  {end_distance:>8.2f}  {distance_delta:>+8.2f}  "
+            f"{episode_steps:>6}  {episode_action_magnitude:>9.3f}  {action_magnitude_per_step:>10.4f}  "
             f"{outcome.upper()}"
         )
 
-        fuels.append(episode_fuel)
+        fuels.append(episode_action_magnitude)
         timesteps.append(episode_steps)
-        start_dists.append(start_dist)
-        end_dists.append(end_dist)
-        all_trajectories.append(trajectory)
-        outcomes.append(outcome)
+        start_dists.append(start_distance)
+        end_dists.append(end_distance)
+        trajectories.append(trajectory)
+        episode_outcomes.append(outcome)
 
     env.close()
 
-    print("\n" + "=" * 65)
-    print("Evaluation Summary")
-    print("=" * 65)
+    print(f"\n--- Evaluation Summary ---")
     print(
         f"Model:          "
         f"{os.path.basename(os.path.dirname(model_path))}/"
@@ -415,10 +471,17 @@ def evaluate_model(fix_unsafe: bool = True):
         f"min={np.min(timesteps)}  max={np.max(timesteps)}"
     )
     print(f"  Per episode: {timesteps}")
+
+    # Fuel here is raw action magnitude, not delta-V.
+    # Approx delta-V = fuel / SPACECRAFT_MASS_KG (step_len = 1 s).
+    # Use drift_full_test.py for true delta-V comparisons between agents.
     print(
-        f"Fuel:       mean={np.mean(fuels):.3f}  std={np.std(fuels):.3f}  "
+        f"Fuel (|a| sum): mean={np.mean(fuels):.3f}  std={np.std(fuels):.3f}  "
         f"min={np.min(fuels):.3f}  max={np.max(fuels):.3f}"
     )
+    print(f"  Approx delta-V (m/s): mean={np.mean(fuels)/SPACECRAFT_MASS_KG:.4f}  "
+          f"median={np.median(fuels)/SPACECRAFT_MASS_KG:.4f}")
+
     print(f"Start dist: mean={np.mean(start_dists):.2f}  std={np.std(start_dists):.2f}")
     print(f"End dist:   mean={np.mean(end_dists):.2f}  std={np.std(end_dists):.2f}")
     print(
@@ -427,7 +490,7 @@ def evaluate_model(fix_unsafe: bool = True):
     )
 
     plot_trajectories(
-        all_trajectories, outcomes, os.path.basename(model_path), model_path
+        trajectories, episode_outcomes, os.path.basename(model_path), model_path, NUM_EPISODES
     )
 
     results_dir = os.path.join(SCRIPT_DIR, "saved_results")
@@ -453,11 +516,19 @@ def evaluate_model(fix_unsafe: bool = True):
             "max": int(np.max(timesteps)),
             "per_episode": [int(t) for t in timesteps],
         },
-        "fuel": {
+        # Raw action magnitude sum. Divide by SPACECRAFT_MASS_KG for delta-V in m/s.
+        "fuel_action_magnitude": {
             "mean": float(np.mean(fuels)),
             "std": float(np.std(fuels)),
             "min": float(np.min(fuels)),
             "max": float(np.max(fuels)),
+        },
+        # Approximate delta-V in m/s (fuel / mass, mass = SPACECRAFT_MASS_KG kg).
+        "fuel_delta_v_approx": {
+            "mean": float(np.mean(fuels) / SPACECRAFT_MASS_KG),
+            "std": float(np.std(fuels) / SPACECRAFT_MASS_KG),
+            "min": float(np.min(fuels) / SPACECRAFT_MASS_KG),
+            "max": float(np.max(fuels) / SPACECRAFT_MASS_KG),
         },
         "start_dist": {
             "mean": float(np.mean(start_dists)),
@@ -475,7 +546,6 @@ def evaluate_model(fix_unsafe: bool = True):
     print(f"\nSaved evaluation results:\n{results_path}")
 
 
-# Entry point for running this file directly.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Keep the original behavior unless this flag is provided.

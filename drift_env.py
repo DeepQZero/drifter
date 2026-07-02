@@ -91,7 +91,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
         super().reset(seed=seed)
         np.random.seed(seed)
         info = {}
-        if self.fixed_start:  # TODO will need to add fuel used and time step
+        if self.fixed_start:
             self.state = np.copy(self.fixed_state)
         else:
             self.state = self.sample_state_space()
