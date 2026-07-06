@@ -64,17 +64,17 @@ CHECKPOINT_DIR = BASE_DIR / "data" / "checkpoints"
 # Load each curriculum stage model. Update these paths to match your run folder.
 # Each model was trained on a progressively harder range of starting distances.
 # Format: safe_ppo_model_{run}_{stage}_{epoch}.zip
-# Example: safe_ppo_model_14_6_9.zip -> run 14, stage 6, epoch 9
-model_1 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_14" /
-                       "safe_ppo_model_14_1_0.zip"))
-model_2 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_14" /
-                       "safe_ppo_model_14_3_1.zip"))
-model_3 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_14" /
-                       "safe_ppo_model_14_6_9.zip"))
-model_4 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_14" /
-                       "safe_ppo_model_14_7_5.zip"))
-model_5_path = CHECKPOINT_DIR / "safe_PPO_14" / \
-                       "safe_ppo_model_14_8_2.zip"
+# Example: safe_ppo_model_15_6_9.zip -> run 15, stage 6, epoch 9
+model_1 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_15" /
+                       "safe_ppo_model_15_1_1.zip"))
+model_2 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_15" /
+                       "safe_ppo_model_15_3_1.zip"))
+model_3 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_15" /
+                       "safe_ppo_model_15_6_9.zip"))
+model_4 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_15" /
+                       "safe_ppo_model_15_7_3.zip"))
+model_5_path = CHECKPOINT_DIR / "safe_PPO_15" / \
+                       "safe_ppo_model_15_8_1.zip"
 model_5 = PPO.load(str(model_5_path))
 
 # Name of the run folder model_5 was loaded from, used to label the
@@ -96,8 +96,8 @@ VERBOSE = False
 # USE_SAFE_ACTION: replace the model's raw action with the result of a
 # one-step lookahead safety check (see get_safe_action below).
 USE_SAFE_ACTION = False
-# USE_ACTION_NOISE: multiply every action by random noise in [0.95, 1.05]
-# to test robustness to actuator or sensor uncertainty.
+# USE_ACTION_NOISE: If True, multiply actions by random noise in [0.95, 1.05].
+# If False, use the model's raw action.
 USE_ACTION_NOISE = False
 
 # True: save a 3D trajectory plot of NUM_PLOT_EPISODES episodes to saved_figures/.
@@ -163,6 +163,7 @@ def plot_full_trajectories(trajectories, outcomes, num_episodes, run_folder):
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")
 
+    # Color blind-friendly palette
     WIN_COLOR = "#005AB5"
     LOSS_COLOR = "#DC3220"
 
