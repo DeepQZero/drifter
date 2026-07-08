@@ -1,44 +1,28 @@
 """
 drift_full_test.py
 
-Tests a chain of curriculum models end-to-end in a single continuous episode.
-
-Starting from the hardest model (model 5, farthest starting range), the script
-runs the agent until that stage's docking condition is met, then switches to
-the next easier model and continues in the same environment. Only the final
-stage's result counts as a win or loss for the episode.
+Tests a chain of curriculum models end to end in a single continuous
+episode. Starts on the hardest model (model 5, farthest starting range),
+runs until that stage docks, then switches to the next easier model in
+the same environment. Only the final stage's result counts as a win or
+loss.
 
 Related evaluation scripts:
-    - drift_full_test.py (this script):
-        End-to-end drift-assisted curriculum chain in a single continuous
-        episode.
-        Use when: Evaluating the full mission flow of the drift agent.
-    
-    - checkpoint_test.py:
-        Evaluates one checkpoint on one curriculum stage over multiple
-        episodes.
-        Use when: Diagnosing a single model in its own training setup.
-
-    - curriculum_evaluation.py:
-        Automatically resolves a checkpoint set and evaluates the full
-        curriculum chain with a fixed seed.
-        Use when: Repeatable, headless results are needed from a
-        checkpoint folder.
-
-    - nodrift_full_test.py:
-        End-to-end direct-docking curriculum chain in a single continuous
-        episode.
-        Use when: Comparing direct-docking performance against the drift
-        agent.
+    - checkpoint_test.py: one checkpoint, one stage, several episodes.
+      Use to diagnose a single model in its own training setup.
+    - curriculum_evaluation.py: auto-resolves a checkpoint set and chains
+      the full curriculum with a fixed seed. Use for repeatable results 
+      from a checkpoint folder.
+    - nodrift_full_test.py: the same idea, for the direct-docking agent.
+      Use to compare against the drift agent.
 
 Differences from curriculum_evaluation.py:
-    - Manual setup: model paths and thresholds set directly at the top.
-    - No fixed random seed: each run has different starting conditions.
-    - Single episode flow: switches models mid-episode until final stage.
+    - Model paths and thresholds are set manually at the top of the file.
+    - No fixed seed, so each run gets different starting conditions.
 
-The environment itself prints "WIN!" when is_docked() is true. This is
-suppressed via contextlib.redirect_stdout so only this script's own
-"Model N: WIN/FAIL" line is shown.
+The environment prints "WIN!" on a successful dock. This script
+suppresses that via contextlib.redirect_stdout so only its own
+"Model N: WIN/FAIL" line shows.
 
 Update the model paths at the top of the script to match your run folder
 before running.
@@ -65,23 +49,28 @@ CHECKPOINT_DIR = BASE_DIR / "data" / "checkpoints"
 # Each model was trained on a progressively harder range of starting distances.
 # Format: safe_ppo_model_{run}_{stage}_{epoch}.zip
 # Example: safe_ppo_model_15_6_9.zip -> run 15, stage 6, epoch 9
-model_1 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_15" /
-                       "safe_ppo_model_15_1_1.zip"))
-model_2 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_15" /
-                       "safe_ppo_model_15_3_1.zip"))
-model_3 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_15" /
-                       "safe_ppo_model_15_6_9.zip"))
-model_4 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_15" /
-                       "safe_ppo_model_15_7_3.zip"))
-model_5_path = CHECKPOINT_DIR / "safe_PPO_15" / \
-                       "safe_ppo_model_15_8_1.zip"
+model_1 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_16" /
+                       "safe_ppo_model_16_1_0.zip"))
+model_2 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_16" /
+                       "safe_ppo_model_16_3_3.zip"))
+model_3 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_16" /
+                       "safe_ppo_model_16_6_9.zip"))
+model_4 = PPO.load(str(CHECKPOINT_DIR / "safe_PPO_16" /
+                       "safe_ppo_model_16_7_0.zip"))
+model_5_path = CHECKPOINT_DIR / "safe_PPO_16" / \
+                       "safe_ppo_model_16_8_3.zip"
 model_5 = PPO.load(str(model_5_path))
+
+# A 9-element observation means the models were trained with SafeRL
+# observations on (see drift_env.py's SAFERL_OBS flag); build the
+# environment to match so the observation layout lines up.
+SAFERL_OBS = model_5.observation_space.shape[0] == 9
 
 # Name of the run folder model_5 was loaded from, used to label the
 # trajectory plot. Pulled from model_5's path rather than hardcoded, since
 # that is usually the hardest/final stage and the most representative model
-# for this run. 
-# Note: if the five models above are loaded from different run folders, 
+# for this run.
+# Note: if the five models above are loaded from different run folders,
 # this will only reflect model_5's folder.
 RUN_FOLDER_NAME = model_5_path.parent.name
 
@@ -107,6 +96,26 @@ PLOT_TRAJECTORIES = True
 # so every episode is plotted. Set to a smaller number (e.g. 10) if
 # NUM_EPISODES is large and plotting all of them would be slow or cluttered.
 NUM_PLOT_EPISODES = NUM_EPISODES
+
+# True: print the thrust vector, its magnitude, and current position/speed
+# every PRINT_THRUST_EVERY steps, so you can watch what the agent is doing
+# as it flies (including drift periods, where thrust reads as zero).
+# False: no per-step thrust output.
+PRINT_THRUST = False
+PRINT_THRUST_EVERY = 10  # print every Nth step; 1 = every step
+
+# True: color each plotted trajectory by thrust magnitude at each point
+# (bright = hard burn, dark = coasting/low thrust) instead of a flat
+# win/loss color. Useful here to see where the drift periods actually are.
+# False: use the plain win/loss coloring.
+COLOR_TRAJECTORY_BY_THRUST = True
+
+# Colormap used when COLOR_TRAJECTORY_BY_THRUST is enabled.
+# Options:
+#   - "grey_to_warm": default, grey to orange/red gradient
+#      grey = drifting, orange/red = hard burn
+#   - "viridis": uniform, colorblind-safe gradient
+THRUST_COLORMAP = "grey_to_warm"
 
 
 def get_safe_action(env, action, obs):
@@ -146,18 +155,26 @@ def get_safe_action(env, action, obs):
     return action
 
 
-def plot_full_trajectories(trajectories, outcomes, num_episodes, run_folder):
+def plot_full_trajectories(trajectories, thrusts, outcomes, num_episodes, run_folder):
     """Plot 3D trajectories of full mission chain episodes and save to disk.
 
     Each trajectory covers the full chain from the farthest starting range
-    down to the final precise dock. Blue trajectories are wins, red are losses.
+    down to the final precise dock.
+
+    If COLOR_TRAJECTORY_BY_THRUST is True, each trajectory segment is colored
+    by how hard the agent was thrusting at that point (a colorblind-friendly
+    colormap from low to high thrust magnitude), so drift/coast periods show
+    up as dark stretches and burns show up bright. Otherwise, trajectories
+    are colored flat blue (win) or red (loss).
 
     Args:
         trajectories: List of trajectories, one per episode. Each trajectory
             is a list of (x, y, z) positions recorded every step.
+        thrusts: List of per-step thrust magnitudes, parallel to
+            trajectories (thrusts[i][j] corresponds to trajectories[i][j]).
         outcomes: List of outcome strings, one per episode.
         num_episodes: Total number of episodes run, used in the title.
-        run_folder: Name of the checkpoint run folder (e.g. "safe_PPO_14"),
+        run_folder: Name of the checkpoint run folder (e.g. "safe_PPO_16"),
             shown in the title so the plot can be traced back to its models.
     """
     fig = plt.figure(figsize=(12, 9))
@@ -168,26 +185,77 @@ def plot_full_trajectories(trajectories, outcomes, num_episodes, run_folder):
     LOSS_COLOR = "#DC3220"
 
     win_plotted = loss_plotted = False
+    thrust_line = None  # last Line3DCollection drawn, used to anchor the colorbar
 
-    for traj, outcome in zip(trajectories, outcomes):
+    if COLOR_TRAJECTORY_BY_THRUST:
+        from mpl_toolkits.mplot3d.art3d import Line3DCollection
+        from matplotlib.colors import LinearSegmentedColormap
+        # Shared color scale across all episodes so brightness is comparable
+        # between trajectories, not just within one.
+        max_thrust = max((max(t) for t in thrusts if len(t) > 0), default=1.0) or 1.0
+        if THRUST_COLORMAP == "grey_to_warm":
+            thrust_cmap = LinearSegmentedColormap.from_list(
+                "grey_to_warm",
+                ["#969393", "#FFDD46", "#E5402E"],
+            )
+        elif THRUST_COLORMAP == "viridis":
+            thrust_cmap = "viridis"
+        else:
+            raise ValueError(
+                f"Unsupported THRUST_COLORMAP: {THRUST_COLORMAP!r}. "
+                'Use "grey_to_warm" or "viridis".'
+            )
+
+    for traj, thrust, outcome in zip(trajectories, thrusts, outcomes):
         traj = np.array(traj)
         if len(traj) < 2:
             continue
 
         is_win = outcome == "win"
         color = WIN_COLOR if is_win else LOSS_COLOR
-        label = None
-        if is_win and not win_plotted:
-            label = "Win"
-            win_plotted = True
-        elif not is_win and not loss_plotted:
-            label = "Loss"
-            loss_plotted = True
 
-        ax.plot(traj[:, 0], traj[:, 1], traj[:, 2],
-                color=color, linewidth=1.2, alpha=0.6, label=label)
-        # Mark the starting position with a dot.
-        ax.scatter(*traj[0], color=color, s=20, alpha=0.9)
+        if COLOR_TRAJECTORY_BY_THRUST:
+            # Build one small line segment per step and color it by the
+            # thrust magnitude used on that step (bright = hard burn).
+            points = traj.reshape(-1, 1, 3)
+            segments = np.concatenate([points[:-1], points[1:]], axis=1)
+            segment_thrust = np.array(thrust[1:len(traj)])
+            if THRUST_COLORMAP == "viridis":
+                # viridis: perceptually uniform and colorblind-safe
+                lc = Line3DCollection(segments, cmap="viridis", alpha=0.8, linewidth=1.5)
+            else:
+                lc = Line3DCollection(segments, cmap=thrust_cmap, alpha=0.8, linewidth=1.5)
+            lc.set_array(segment_thrust)
+            lc.set_clim(0, max_thrust)
+            ax.add_collection3d(lc)
+            thrust_line = lc
+            # Still mark win/loss so the legend and starting dot are meaningful.
+            label = None
+            if is_win and not win_plotted:
+                label = "Win (start)"
+                win_plotted = True
+            elif not is_win and not loss_plotted:
+                label = "Loss (start)"
+                loss_plotted = True
+            ax.scatter(*traj[0], color=color, s=25, alpha=0.9,
+                       edgecolors="black", linewidths=0.5, label=label)
+        else:
+            label = None
+            if is_win and not win_plotted:
+                label = "Win"
+                win_plotted = True
+            elif not is_win and not loss_plotted:
+                label = "Loss"
+                loss_plotted = True
+
+            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2],
+                    color=color, linewidth=1.2, alpha=0.6, label=label)
+            # Mark the starting position with a dot.
+            ax.scatter(*traj[0], color=color, s=20, alpha=0.9)
+
+    if thrust_line is not None:
+        cbar = fig.colorbar(thrust_line, ax=ax, shrink=0.6, pad=0.04)
+        cbar.set_label("Thrust magnitude (sum |thrust| per step)", labelpad=10)
 
     # Chief spacecraft is always at the origin.
     ax.scatter(0, 0, 0, marker="x", color="black", s=150, linewidths=2.5,
@@ -204,7 +272,7 @@ def plot_full_trajectories(trajectories, outcomes, num_episodes, run_folder):
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
     ax.set_zlabel("Z (m)")
-    ax.set_title(f"Full Mission Chain Trajectories - {run_folder}\n"
+    ax.set_title(f"Drifter Full Mission Chain Trajectories - {run_folder}\n"
                  f"{num_episodes} Episodes, Win rate: "
                  f"{sum(1 for o in outcomes if o == 'win')}/{num_episodes}")
     ax.legend(loc="upper left")
@@ -223,6 +291,7 @@ def plot_full_trajectories(trajectories, outcomes, num_episodes, run_folder):
 fuels = []      # total fuel used per episode
 wins = []       # 1 for a successful dock, 0 for a failure
 all_trajectories = []   # full position trajectory per episode, if plotting
+all_thrusts = []        # per-step thrust magnitude, parallel to all_trajectories
 all_outcomes = []       # win or loss per episode, if plotting
 
 for i in range(NUM_EPISODES):
@@ -234,7 +303,7 @@ for i in range(NUM_EPISODES):
     # Create a fresh curriculum and environment for each episode.
     # get_curriculum(10) returns the test environment config.
     curriculum, _ = get_curriculum(10)
-    env = DriftTestEnv(**curriculum)
+    env = DriftTestEnv(saferl_obs=SAFERL_OBS, **curriculum)
     obs, info = env.reset()
     done = False
 
@@ -249,7 +318,9 @@ for i in range(NUM_EPISODES):
 
     # Record the trajectory for this episode if plotting is enabled.
     episode_trajectory = [obs[:3].copy()] if PLOT_TRAJECTORIES and i < NUM_PLOT_EPISODES else None
+    episode_thrusts = [0.0] if episode_trajectory is not None else None
 
+    step_count = 0
     while not done:
         # obs[:-1] *= np.random.uniform(0.99, 1.01, 1)
 
@@ -273,9 +344,11 @@ for i in range(NUM_EPISODES):
         if USE_ACTION_NOISE:
             action = action * np.random.uniform(0.95, 1.05)
 
+        thrust_mag = float(np.sum(np.abs(action)))
+
         # Accumulate fuel as the sum of absolute thrust across all axes,
         # divided by mass and multiplied by step length to get delta-V units.
-        epi_fuel += float(np.sum(np.abs(action))) / env.env.m * env.env.step_len
+        epi_fuel += thrust_mag / env.env.m * env.env.step_len
 
         # Stdout is suppressed here because the environment itself prints
         # "WIN!" on a successful dock, which would duplicate the
@@ -284,10 +357,18 @@ for i in range(NUM_EPISODES):
             obs, reward, term, trunc, info = env.step(action)
         if VERBOSE:
             print(np.linalg.norm(obs[0:3]), np.linalg.norm(obs[3:6]))
+        if PRINT_THRUST and step_count % PRINT_THRUST_EVERY == 0:
+            pos_norm = np.linalg.norm(obs[0:3])
+            speed_norm = np.linalg.norm(obs[3:6])
+            print(f'    t={step_count:4d}  thrust={np.round(action, 3)}  '
+                  f'|thrust|={thrust_mag:.3f}  dist={pos_norm:.2f}m  speed={speed_norm:.3f}m/s'
+                  f'{"  DRIFTING" if env.is_drifting else "  THRUSTING"}')
         done = term or trunc
+        step_count += 1
 
         if episode_trajectory is not None:
             episode_trajectory.append(obs[:3].copy())
+            episode_thrusts.append(thrust_mag)
 
         if done:
             stage_result = 'WIN' if env.env.is_docked() else 'FAIL'
@@ -301,6 +382,7 @@ for i in range(NUM_EPISODES):
                 fuels.append(epi_fuel)
                 if episode_trajectory is not None:
                     all_trajectories.append(episode_trajectory)
+                    all_thrusts.append(episode_thrusts)
                     all_outcomes.append("win" if result else "loss")
             else:
                 # This stage finished but the chain is not done yet.
@@ -309,6 +391,8 @@ for i in range(NUM_EPISODES):
                 done = False
                 env.is_drifting = False
                 env.env.state[6] = 0  # reset the timestep counter in the state vector
+                env.env.fuel_used = 0 # reset fuel counter so the next stage isn't
+                                      # charged for fuel spent on an earlier stage
                 model_num -= 1
 
                 # env.env.state[3] = 0.0
@@ -349,6 +433,6 @@ print(f'  25th pct:  {np.percentile(fuels, 25):.3f}')
 print(f'  50th pct:  {np.percentile(fuels, 50):.3f}')
 print(f'  75th pct:  {np.percentile(fuels, 75):.3f}')
 
-# Plot trajectories if enabled and we have data.
+# Plot trajectories (if enabled)
 if PLOT_TRAJECTORIES and all_trajectories:
-    plot_full_trajectories(all_trajectories, all_outcomes, len(wins), RUN_FOLDER_NAME)
+    plot_full_trajectories(all_trajectories, all_thrusts, all_outcomes, len(wins), RUN_FOLDER_NAME)

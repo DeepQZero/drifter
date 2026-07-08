@@ -1,8 +1,80 @@
+"""
+docking_env.py
+
+Direct-docking environment: CWH dynamics and no drift mechanic. 
+Dense reward with a proximity-scaled velocity penalty, plus 
+optional SafeRL comparison flags (obs layout, reward shape, 
+fuel penalty, budgeted velocity constraint, static observation 
+normalization).
+
+Used by nodrift_initial_trainer.py and the nodrift eval scripts.
+"""
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from scipy.integrate import solve_ivp
 from numpy.linalg import norm as vec_norm
+
+
+# ===================== SafeRL comparison options =====================
+# Optional switches to mirror the AFRL/ACT3 SafeRL docking baseline (IEEE
+# Aerospace 2022) for A/B comparison. Usually defaults to False (current
+# drifter behavior); flip here or via the matching constructor argument.
+# SafeRL references: saferl/aerospace/tasks/docking/processors.py and
+# saferl/environment/tasks/processor/reward.py.
+
+# True: append [speed, max_vel_limit] to the obs (SafeRL DockingObservation).
+# False: 7-element obs [x, y, z, vx, vy, vz, timestep].
+SAFERL_OBS = True
+
+# True: exponential distance-change reward (gradient strongest near target).
+# False: linear approach reward.
+SAFERL_EXP_DIST_REWARD = True
+SAFERL_DIST_PIVOT = 100.0   # SafeRL 'pivot' (m): closing reward doubles every pivot
+SAFERL_DIST_SCALE = 2.0     # SafeRL 'c'
+
+# True: subtract a delta-V fuel penalty each step. False: no fuel term.
+SAFERL_DELTA_V_PENALTY = False
+SAFERL_DELTA_V_SCALE = 0.01  # SafeRL ProportionalRewardProcessor 'scale' on delta_v
+
+# True: on a successful dock, add a time bonus of 1 - timestep /
+# max_episode_len (SafeRL SuccessRewardProcessor), so docking with time
+# to spare pays up to +1 extra. False: flat +1 dock reward only.
+# Off by default: it adds a second objective (finish fast) that could
+# conflict with fuel economy, so enable it deliberately as an ablation.
+SAFERL_SUCCESS_TIME_BONUS = False
+
+# True: enforce SafeRL's budgeted velocity constraint. Each step over the
+# speed limit pays a graded penalty (SCALE * violation + BIAS) into a
+# per-episode sum; the episode fails once that sum reaches BUDGET. SafeRL
+# never ends an episode on a first mid-flight violation, so this replaces
+# the old instant-termination behavior.
+# False: soft proximity-scaled speed penalty only, no budget or failure.
+SAFERL_VEL_CONSTRAINT = True
+SAFERL_VEL_VIOLATION_SCALE = -0.01  # SafeRL ProportionalRewardProcessor 'scale'
+SAFERL_VEL_VIOLATION_BIAS = -0.01   # SafeRL 'bias', flat cost per violating step
+SAFERL_VEL_BUDGET = -5.0            # SafeRL 'lower_bound'; fail at this sum
+
+# True: append a braking margin (distance minus stopping distance) to the
+# obs (a direct "start braking now" signal). False: obs size unchanged.
+# Off by default: other scripts auto-detect obs layout by checking for
+# exactly 9 elements (SAFERL_OBS), so this needs those checks updated too.
+SAFERL_BRAKING_MARGIN_OBS = False
+
+# True: statically normalize the observation like SafeRL (positions / 100,
+# velocities / 0.5) so network inputs land near [-1, 1]. False: raw values.
+# Earlier runs were trained on raw positions/velocities; set False to
+# evaluate those checkpoints. The timestep is now always normalized.
+NORMALIZE_OBS = True
+OBS_POS_NORM = 100.0  # SafeRL DockingObservationProcessor position divisor
+OBS_VEL_NORM = 0.5    # SafeRL velocity divisor
+
+# Whole-episode time penalty, spread evenly across max_episode_len steps.
+# A flat per-step value summed to -25 over a 5,000-step episode.
+TIME_PENALTY_TOTAL = -1.0
+# TIME_PENALTY_TOTAL is a per-step shaping cost
+# SAFERL_SUCCESS_TIME_BONUS is a separate terminal reward for a successful dock.
 
 
 class SpaceCraftDockingEnv3D(gym.Env):
@@ -32,9 +104,14 @@ class SpaceCraftDockingEnv3D(gym.Env):
         time_step (int): Step counter, also stored in state[6].
         n (float): Mean motion of the chief orbit in rad/s.
         m (float): Mass of the deputy spacecraft in kg.
-        time_penalty (float): Reward penalty applied every step to encourage speed.
+        time_penalty (float): Per-step time penalty, TIME_PENALTY_TOTAL
+            spread evenly over max_episode_len.
         dist_coeff (float): Reward coefficient for change in distance each step.
         vel_penalty_coeff (float): Reward coefficient for exceeding the speed limit.
+        normalize_obs (bool): If True, statically normalize positions and
+            velocities in the observation (SafeRL constants).
+        vel_violation_reward_sum (float): Velocity-violation penalties
+            accumulated this episode; episode fails at saferl_vel_budget.
     """
 
     def __init__(self,
@@ -52,7 +129,14 @@ class SpaceCraftDockingEnv3D(gym.Env):
                  max_init_vel_bound=0.1,
                  step_len=1,
                  fuel_used=None,
-                 time_step=None):
+                 time_step=None,
+                 saferl_obs=SAFERL_OBS,
+                 saferl_exp_dist_reward=SAFERL_EXP_DIST_REWARD,
+                 saferl_delta_v_penalty=SAFERL_DELTA_V_PENALTY,
+                 saferl_success_time_bonus=SAFERL_SUCCESS_TIME_BONUS,
+                 saferl_vel_constraint=SAFERL_VEL_CONSTRAINT,
+                 saferl_braking_margin_obs=SAFERL_BRAKING_MARGIN_OBS,
+                 normalize_obs=NORMALIZE_OBS):
         self.fixed_start = fixed_start
         self.fixed_state = fixed_state
         self.reward_structure = reward_structure
@@ -69,11 +153,31 @@ class SpaceCraftDockingEnv3D(gym.Env):
         self.fuel_used = fuel_used
         self.time_step = time_step
 
-        self.n = 0.001027         # mean motion of chief orbit (rad/s)
-        self.m = 12               # deputy mass (kg)
-        self.time_penalty = -0.005
+        self.n = 0.001027 # Mean motion of chief orbit (rad/s)
+        self.m = 12       # Deputy mass (kg)
+        # Per-step time penalty scaled so the whole-episode total stays at
+        # TIME_PENALTY_TOTAL, comparable to the +/-1 terminal rewards at
+        # every stage regardless of episode length.
+        self.time_penalty = TIME_PENALTY_TOTAL / self.max_episode_len
         self.dist_coeff = -0.01   # increased from -0.005 for stronger approach signal
         self.vel_penalty_coeff = -0.0075
+
+        # SafeRL comparison options (see constants for details).
+        self.saferl_obs = saferl_obs
+        self.saferl_exp_dist_reward = saferl_exp_dist_reward
+        self.saferl_delta_v_penalty = saferl_delta_v_penalty
+        self.saferl_success_time_bonus = saferl_success_time_bonus
+        self.saferl_vel_constraint = saferl_vel_constraint
+        self.saferl_braking_margin_obs = saferl_braking_margin_obs
+        self.normalize_obs = normalize_obs
+        self.saferl_dist_scale = SAFERL_DIST_SCALE
+        self.saferl_dist_a = np.log(2.0) / SAFERL_DIST_PIVOT  # closing reward doubles every pivot m
+        self.saferl_delta_v_scale = SAFERL_DELTA_V_SCALE
+        self.saferl_vel_violation_scale = SAFERL_VEL_VIOLATION_SCALE
+        self.saferl_vel_violation_bias = SAFERL_VEL_VIOLATION_BIAS
+        self.saferl_vel_budget = SAFERL_VEL_BUDGET
+        self.step_delta_v = 0.0  # Delta-V of the most recent step, set in step()
+        self.vel_violation_reward_sum = 0.0  # Constraint budget used this episode
 
         self.action_space = spaces.Box(
             low=np.array([-self.u_max] * 3),
@@ -81,9 +185,17 @@ class SpaceCraftDockingEnv3D(gym.Env):
         )
         # Observation is unbounded; the environment handles out-of-bounds
         # termination internally rather than clipping the observation.
+        # 7 elements by default; +2 when saferl_obs appends [speed,
+        # max_vel_limit]; +1 more when saferl_braking_margin_obs appends
+        # the braking feature.
+        obs_dim = 7
+        if self.saferl_obs:
+            obs_dim += 2
+        if self.saferl_braking_margin_obs:
+            obs_dim += 1
         self.observation_space = spaces.Box(
-            low=np.array([-np.inf] * 7),
-            high=np.array([np.inf] * 7)
+            low=np.array([-np.inf] * obs_dim),
+            high=np.array([np.inf] * obs_dim)
         )
         self.state = None
 
@@ -98,7 +210,6 @@ class SpaceCraftDockingEnv3D(gym.Env):
             A tuple of (observation, info dict).
         """
         super().reset(seed=seed)
-        np.random.seed(seed)
         info = {}
         if self.fixed_start:
             self.state = np.copy(self.fixed_state)
@@ -106,7 +217,64 @@ class SpaceCraftDockingEnv3D(gym.Env):
             self.state = self.sample_state_space()
         self.fuel_used = 0
         self.time_step = 0
-        return self.state, info
+        self.step_delta_v = 0.0
+        self.vel_violation_reward_sum = 0.0
+        return self._get_obs(), info
+
+    def velocity_limit(self, distance: float) -> float:
+        """Distance-scaled safe speed limit (SafeRL DockingVelocityLimit:
+        0.2 + slope * n * dist). Shared by the speed penalty, the start-state
+        rejection, and the optional SafeRL observation.
+        """
+        return 0.2 + 2 * self.n * distance
+
+    def stopping_distance(self, speed: float) -> float:
+        """Constant-deceleration stopping distance at max thrust: d = v^2/(2*a_max).
+
+        Args:
+            speed: Current speed in m/s.
+
+        Returns:
+            Required stopping distance in meters.
+        """
+        a_max = self.u_max / self.m  # max acceleration per axis (m/s^2)
+        return speed ** 2 / (2 * a_max)
+
+    def _get_obs(self) -> np.ndarray:
+        """Return the observation: the 7-element state, plus [speed,
+        max_vel_limit] when saferl_obs is on, and the braking margin
+        (distance minus stopping distance) when saferl_braking_margin_obs
+        is on.
+
+        The timestep is always normalized by max_episode_len. With
+        normalize_obs on, positions and velocities are also divided by
+        SafeRL's static constants so every input lands near [-1, 1];
+        raw values (positions up to 150, timesteps up to 5,000) are out
+        of distribution for weights trained on earlier/smaller stages
+        and can destabilize training as the curriculum grows.
+        """
+        obs = np.copy(self.state)
+        obs[6] = obs[6] / self.max_episode_len
+        if self.normalize_obs:
+            obs[0:3] = obs[0:3] / OBS_POS_NORM
+            obs[3:6] = obs[3:6] / OBS_VEL_NORM
+
+        if not self.saferl_obs and not self.saferl_braking_margin_obs:
+            return obs
+
+        distance = vec_norm(self.state[0:3])
+        speed = vec_norm(self.state[3:6])
+        if self.saferl_obs:
+            # These two SafeRL features use a divisor of 1, so they stay unscaled
+            # even when normalize_obs is enabled.
+            max_vel_limit = self.velocity_limit(distance)
+            obs = np.concatenate([obs, np.array([speed, max_vel_limit])])
+        if self.saferl_braking_margin_obs:
+            margin = distance - self.stopping_distance(speed)
+            if self.normalize_obs:
+                margin = margin / OBS_POS_NORM
+            obs = np.concatenate([obs, np.array([margin])])
+        return obs
 
     def sample_state_space(self) -> np.ndarray:
         """Sample a valid random starting state.
@@ -118,17 +286,18 @@ class SpaceCraftDockingEnv3D(gym.Env):
         Returns:
             A valid 7-element starting state with timestep counter set to 0.
         """
-        initial_state_space = spaces.Box(
-            low=np.array([-self.max_start_dist] * 3 + [-self.max_start_speed] * 3),
-            high=np.array([self.max_start_dist] * 3 + [self.max_start_speed] * 3)
-        )
-        sampled_state = initial_state_space.sample()
+        low = np.array([-self.max_start_dist] * 3 + [-self.max_start_speed] * 3)
+        high = np.array([self.max_start_dist] * 3 + [self.max_start_speed] * 3)
+        # Sample directly from the env's own seeded generator instead of
+        # Box.sample(), since Box has no public way to reuse an external
+        # generator in this Gymnasium version.
+        sampled_state = self.np_random.uniform(low=low, high=high)
         rel_dist = vec_norm(sampled_state[0:3])
         rel_speed = vec_norm(sampled_state[3:6])
         # Reject if too close, too far, or moving too fast for a safe start.
         if (rel_dist < self.min_start_dist or
                 rel_dist > self.max_start_dist or
-                rel_speed > 0.2 + 2 * self.n * rel_dist):
+                rel_speed > self.velocity_limit(rel_dist)):
             return self.sample_state_space()  # TODO: recursion error if bounds are very tight
         # Append timestep counter as the 7th state element.
         return np.concatenate([sampled_state, np.array([0])])
@@ -146,9 +315,11 @@ class SpaceCraftDockingEnv3D(gym.Env):
         old_state = np.copy(self.state)
         self.state = self.propagate(action)
         self.fuel_used += vec_norm(action) / self.m * self.step_len
+        # SafeRL-style per-step delta-V (L1 thrust / mass * step).
+        self.step_delta_v = float(np.sum(np.abs(action))) / self.m * self.step_len
         reward, terminated, truncated = self.rewards(old_state)
         info = {}
-        return self.state, reward, terminated, truncated, info
+        return self._get_obs(), reward, terminated, truncated, info
 
     def propagate(self, action: np.ndarray) -> np.ndarray:
         """Integrate the CWH dynamics forward one step.
@@ -206,9 +377,12 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def rewards(self, last_state: np.ndarray) -> tuple[float, bool, bool]:
         """Compute the reward and termination flags for the current step.
 
-        Unlike drift_env.py, this environment penalizes unsafe speed
-        instead of terminating on it. This keeps episodes alive longer
-        for a direct-docking agent that has not yet learned speed control.
+        Speed over the limit is handled two ways. The soft proximity-scaled
+        penalty always applies. With saferl_vel_constraint on, each
+        violating step also pays a graded penalty into a per-episode sum,
+        and the episode fails once the sum reaches saferl_vel_budget
+        (SafeRL semantics: no instant termination, and no extra -1 when
+        the budget runs out since the penalties already total -5).
 
         Args:
             last_state: The state from before this step, used to compute
@@ -219,15 +393,31 @@ class SpaceCraftDockingEnv3D(gym.Env):
         """
         tot_step_rew = 0
 
+        current_distance = float(vec_norm(self.state[0:3]))
+        current_speed = float(vec_norm(self.state[3:6]))
+        speed_limit = self.velocity_limit(current_distance)
+
         docked = self.is_docked()
         crashed = self.is_crashed()
         out_of_time = self.is_out_of_time()
         out_of_fuel = self.is_out_of_fuel()
         out_of_bounds = self.is_out_of_bounds()
 
+        # Budgeted velocity constraint: accumulate the graded penalty
+        # while violating, regardless of reward structure, so the budget
+        # termination behaves the same in dense and sparse modes.
+        violation_penalty = 0.0
+        if self.saferl_vel_constraint and current_speed > speed_limit:
+            violation_penalty = (
+                self.saferl_vel_violation_scale * (current_speed - speed_limit)
+                + self.saferl_vel_violation_bias
+            )
+            self.vel_violation_reward_sum += violation_penalty
+
+        term = (docked or crashed or out_of_bounds or out_of_fuel or
+                self.vel_budget_exhausted())
         # Out-of-time is truncation, not termination, to preserve the
         # episode value estimate in PPO.
-        term = docked or crashed or out_of_bounds or out_of_fuel
         trunc = False if term else out_of_time
 
         if docked:
@@ -239,25 +429,44 @@ class SpaceCraftDockingEnv3D(gym.Env):
         if self.reward_structure == "dense":
             if docked:
                 tot_step_rew += 1
+                if self.saferl_success_time_bonus:
+                    # SafeRL success time bonus: up to +1 extra for
+                    # docking with time to spare.
+                    tot_step_rew += 1 - self.state[6] / self.max_episode_len
             elif crashed:
                 tot_step_rew += -1
             elif out_of_bounds or out_of_fuel or out_of_time:
                 tot_step_rew += -1
+            # Budget exhaustion gets no terminal adjustment here; the
+            # accumulated violation penalties are the entire cost.
 
-            current_distance = float(vec_norm(self.state[0:3]))
             prev_distance = float(vec_norm(last_state[0:3]))
-            # Positive reward for closing distance, negative for opening it.
-            # Sign is flipped vs the original penalty formulation to give a
-            # stronger gradient signal toward the target at long range.
-            approach_reward = self.dist_coeff * (prev_distance - current_distance)
+            if self.saferl_exp_dist_reward:
+                # SafeRL exponential distance-change reward (stronger near target).
+                approach_reward = self.saferl_dist_scale * (
+                    np.exp(-self.saferl_dist_a * current_distance)
+                    - np.exp(-self.saferl_dist_a * prev_distance)
+                )
+            else:
+                # Positive for closing, negative for opening. dist_coeff is
+                # negative, so the delta must be (current - prev), matching
+                # drift_env.py. Reversing it inverts the sign and trains the
+                # agent to back away / rush the target.
+                approach_reward = self.dist_coeff * (current_distance - prev_distance)
             # Speed penalty scaled by proximity so the agent can accelerate
-            # freely at long range and only needs precise speed control close
-            # to the target. Full penalty applies only within 10m.
-            current_speed = float(vec_norm(self.state[3:6]))
-            speed_limit = 0.2 + (2 * self.n) * current_distance
-            approach_factor = min(1.0, 10.0 / max(current_distance, 1.0))
+            # freely at long range and only needs precise speed control
+            # close to the target. Braking zone sized by actual stopping
+            # distance at the current speed, not a fixed 10m, so going
+            # fast starts the penalty from farther out.
+            braking_zone = max(self.dock_dist, self.stopping_distance(current_speed))
+            # Floor added so velocity penalty isn't near-zero at range.
+            # Previously this let the agent build speed until close.
+            approach_factor = max(0.3, min(1.0, braking_zone / max(current_distance, 1.0)))
             vel_penalty = self.vel_penalty_coeff * max(current_speed - speed_limit, 0) * approach_factor
-            tot_step_rew += vel_penalty + approach_reward + self.time_penalty
+            tot_step_rew += vel_penalty + approach_reward + self.time_penalty + violation_penalty
+            if self.saferl_delta_v_penalty:
+                # SafeRL delta-V fuel penalty (scale * step delta-V).
+                tot_step_rew += -self.saferl_delta_v_scale * self.step_delta_v
 
         return tot_step_rew, term, trunc
 
@@ -278,6 +487,25 @@ class SpaceCraftDockingEnv3D(gym.Env):
         """
         return (vec_norm(self.state[0:3]) < self.dock_dist and
                 vec_norm(self.state[3:6]) >= self.dock_speed)
+
+    def is_unsafe(self) -> bool:
+        """True if current speed is above the distance-based limit from 
+        velocity_limit().
+
+        When saferl_vel_constraint is on, violating steps also add to
+        vel_violation_reward_sum in rewards(); otherwise only the soft
+        proximity-scaled penalty applies.
+        """
+        current_distance = float(vec_norm(self.state[0:3]))
+        current_speed = float(vec_norm(self.state[3:6]))
+        return current_speed > self.velocity_limit(current_distance)
+
+    def vel_budget_exhausted(self) -> bool:
+        """True once accumulated velocity-violation penalties reach the
+        budget. The terminal failure condition of the budgeted constraint.
+        """
+        return (self.saferl_vel_constraint and
+                self.vel_violation_reward_sum <= self.saferl_vel_budget)
 
     def is_out_of_fuel(self) -> bool:
         """Check if the deputy has exceeded its fuel budget.

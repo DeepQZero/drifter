@@ -1,3 +1,14 @@
+"""
+drift_env.py
+
+Drift-assisted docking environment that combines CWH dynamics with DriftTrainEnv
+and DriftTestEnv wrappers. At each step, the det_drift() method analytically
+verifies whether drifting from the current state reaches the dock; if successful,
+the episode is credited and terminates.
+
+Utilized by drift_initial_trainer.py and the associated drift evaluation scripts.
+"""
+
 import copy
 
 import gymnasium as gym
@@ -5,6 +16,30 @@ from gymnasium import spaces
 import numpy as np
 from scipy.integrate import solve_ivp
 from numpy.linalg import norm as vec_norm
+
+
+# ===================== SafeRL comparison options =====================
+# Optional switches to mirror the AFRL/ACT3 SafeRL docking baseline (IEEE
+# Aerospace 2022).
+# Mirrors docking_env.py's block so the drift agent can be A/B compared
+# against SafeRL. Usually defaults to False (current drifter behavior). Note
+# the drift env already enforces the velocity constraint via is_unsafe, so
+# it has no separate constraint flag.
+# SafeRL references: saferl/aerospace/tasks/docking/processors.py and
+# saferl/environment/tasks/processor/reward.py.
+
+# True: append [speed, max_vel_limit] to the obs (SafeRL DockingObservation).
+# False: 7-element obs [x, y, z, vx, vy, vz, timestep].
+SAFERL_OBS = False
+
+# True: exponential distance-change reward. False: linear approach reward.
+SAFERL_EXP_DIST_REWARD = False
+SAFERL_DIST_PIVOT = 100.0   # SafeRL 'pivot' (m): closing reward doubles every pivot
+SAFERL_DIST_SCALE = 2.0     # SafeRL 'c'
+
+# True: subtract a delta-V fuel penalty each step. False: no fuel term.
+SAFERL_DELTA_V_PENALTY = False
+SAFERL_DELTA_V_SCALE = 0.01  # SafeRL ProportionalRewardProcessor 'scale' on delta_v
 
 
 class SpaceCraftDockingEnv3D(gym.Env):
@@ -52,7 +87,10 @@ class SpaceCraftDockingEnv3D(gym.Env):
                  step_len=1,
                  drift_step_len=1,
                  fuel_used=None,
-                 time_step=None
+                 time_step=None,
+                 saferl_obs=SAFERL_OBS,
+                 saferl_exp_dist_reward=SAFERL_EXP_DIST_REWARD,
+                 saferl_delta_v_penalty=SAFERL_DELTA_V_PENALTY
                  ) -> None:
         self.fixed_start = fixed_start
         self.fixed_state = fixed_state
@@ -72,24 +110,35 @@ class SpaceCraftDockingEnv3D(gym.Env):
         self.fuel_used = fuel_used
         self.time_step = time_step
 
-        self.n = 0.001027
-        self.m = 12  # mass of spacecraft
+        self.n = 0.001027 # Mean motion of chief orbit (rad/s)
+        self.m = 12  # Deputy mass (kg)
         self.time_penalty = -0.005  # TODO originally 0.0005
         self.dist_coeff = -0.005  # TODO originally 0.0005
+
+        # SafeRL comparison options (see constants for details).
+        self.saferl_obs = saferl_obs
+        self.saferl_exp_dist_reward = saferl_exp_dist_reward
+        self.saferl_delta_v_penalty = saferl_delta_v_penalty
+        self.saferl_dist_scale = SAFERL_DIST_SCALE
+        self.saferl_dist_a = np.log(2.0) / SAFERL_DIST_PIVOT  # closing reward doubles every pivot m
+        self.saferl_delta_v_scale = SAFERL_DELTA_V_SCALE
+        self.step_delta_v = 0.0  # Delta-V of the most recent step, set in step()
+
         self.action_space = spaces.Box(
             low=np.array([-self.u_max]*3),
             high=np.array([self.u_max]*3)
         )
+        # 7 elements by default; 9 when saferl_obs appends [speed, max_vel_limit].
+        obs_dim = 9 if self.saferl_obs else 7
         self.observation_space = spaces.Box(
-            low=np.array([-np.inf]*7),
-            high=np.array([np.inf]*7)
+            low=np.array([-np.inf]*obs_dim),
+            high=np.array([np.inf]*obs_dim)
         )
         self.state = None
 
     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
         """Standard Gymnasium reset function returning start state and info."""
         super().reset(seed=seed)
-        np.random.seed(seed)
         info = {}
         if self.fixed_start:
             self.state = np.copy(self.fixed_state)
@@ -97,20 +146,40 @@ class SpaceCraftDockingEnv3D(gym.Env):
             self.state = self.sample_state_space()
         self.fuel_used = 0
         self.time_step = 0
-        return self.state, info
+        self.step_delta_v = 0.0
+        return self._get_obs(), info
+
+    def velocity_limit(self, distance: float) -> float:
+        """Distance-scaled safe speed limit (SafeRL DockingVelocityLimit:
+        0.2 + slope * n * dist). Shared by is_unsafe, the start-state
+        rejection, and the optional SafeRL observation.
+        """
+        return 0.2 + 2 * self.n * distance
+
+    def _get_obs(self) -> np.ndarray:
+        """Return the observation: the 7-element state by default, or with
+        [speed, max_vel_limit] appended when saferl_obs is on.
+        """
+        if not self.saferl_obs:
+            return self.state
+        distance = vec_norm(self.state[0:3])
+        speed = vec_norm(self.state[3:6])
+        max_vel_limit = self.velocity_limit(distance)
+        return np.concatenate([self.state, np.array([speed, max_vel_limit])])
 
     def sample_state_space(self) -> np.ndarray:
         """Samples and returns start state."""
-        initial_state_space = spaces.Box(
-            low=np.array([-self.max_start_dist] * 3 + [-self.max_start_speed] * 3),
-            high=np.array([self.max_start_dist] * 3 + [self.max_start_speed] * 3)
-        )
-        sampled_state = initial_state_space.sample()
+        low = np.array([-self.max_start_dist] * 3 + [-self.max_start_speed] * 3)
+        high = np.array([self.max_start_dist] * 3 + [self.max_start_speed] * 3)
+        # Sample directly from the env's own seeded generator instead of
+        # Box.sample(), since Box has no public way to reuse an external
+        # generator in this Gymnasium version.
+        sampled_state = self.np_random.uniform(low=low, high=high)
         rel_dist = vec_norm(sampled_state[0:3])
         rel_speed = vec_norm(sampled_state[3:6])
         if ((rel_dist < self.min_start_dist) or
             (rel_dist > self.max_start_dist) or
-            (rel_speed > 0.2 + 2 * self.n * rel_dist)):
+            (rel_speed > self.velocity_limit(rel_dist))):
             return self.sample_state_space()  # TODO recursion error maybe?
         return np.concatenate([sampled_state, np.array([0])])
 
@@ -122,9 +191,11 @@ class SpaceCraftDockingEnv3D(gym.Env):
         self.state = self.propagate(action, drift)
         self.fuel_used += vec_norm(action)/self.m * self.step_len  # TODO
         # TODO only allow fuel used to be a certain amount? Check paper.
+        # SafeRL-style per-step delta-V (L1 thrust / mass * step).
+        self.step_delta_v = float(np.sum(np.abs(action))) / self.m * self.step_len
         reward, terminated, truncated = self.rewards(old_state)
         info = {}
-        return self.state, reward, terminated, truncated, info
+        return self._get_obs(), reward, terminated, truncated, info
 
     def propagate(self, action: np.ndarray, drift: bool=False) -> np.ndarray:
         """Computes new state."""
@@ -186,9 +257,19 @@ class SpaceCraftDockingEnv3D(gym.Env):
                 tot_step_rew += -1
             current_distance = float(vec_norm(self.state[0:3]))  # TODO float?
             prev_distance = float(vec_norm(last_state[0:3]))
-            prox_penalty = (self.dist_coeff *
-                            (current_distance - prev_distance))
+            if self.saferl_exp_dist_reward:
+                # SafeRL exponential distance-change reward (stronger near target).
+                prox_penalty = self.saferl_dist_scale * (
+                    np.exp(-self.saferl_dist_a * current_distance)
+                    - np.exp(-self.saferl_dist_a * prev_distance)
+                )
+            else:
+                prox_penalty = (self.dist_coeff *
+                                (current_distance - prev_distance))
             tot_step_rew += (prox_penalty + self.time_penalty)
+            if self.saferl_delta_v_penalty:
+                # SafeRL delta-V fuel penalty (scale * step delta-V).
+                tot_step_rew += -self.saferl_delta_v_scale * self.step_delta_v
         return tot_step_rew, term, trunc
 
     def is_docked(self) -> bool:
@@ -216,7 +297,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
     def is_unsafe(self):
         current_distance = float(vec_norm(self.state[0:3]))  # TODO float?
         current_speed = float(vec_norm(self.state[3:6]))
-        speed_limit = 0.2 + (2 * self.n) * current_distance
+        speed_limit = self.velocity_limit(current_distance)
         return current_speed - speed_limit > 0
 
     def only_oot(self):
@@ -235,9 +316,8 @@ class SpaceCraftDockingEnv3D(gym.Env):
 
 
 class DriftTrainEnv(gym.Env):
-    """
-        Wrapper for docking environment that looks ahead each time step to
-        determine if docking condition can be achieved by drifting.
+    """Wrapper for docking environment that looks ahead each time 
+    step to determine if docking condition can be achieved by drifting.
     """
     def __init__(self, **kwargs) -> None:
         self.env = SpaceCraftDockingEnv3D(**kwargs)
@@ -246,7 +326,7 @@ class DriftTrainEnv(gym.Env):
 
     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
         """Standard Gymnasium reset function returning start state and info."""
-        return self.env.reset()
+        return self.env.reset(seed=seed)
 
     def step(self, action: np.ndarray) -> \
             tuple[np.ndarray, float, bool, bool, dict]:
@@ -287,7 +367,7 @@ class DriftTestEnv(gym.Env):
     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
         """Standard Gymnasium reset function returning start state and info."""
         self.is_drifting = False
-        return self.env.reset()
+        return self.env.reset(seed=seed)
 
     def step(self, action: np.ndarray) -> \
             tuple[np.ndarray, float, bool, bool, dict]:

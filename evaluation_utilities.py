@@ -8,45 +8,162 @@ Putting this logic in one place means a bug fix here applies everywhere,
 instead of needing to be copied by hand into each script.
 
 Contents:
-1. extract_stage: reads the curriculum stage number from a checkpoint
-   filename. Handles both drift (safe_ppo_model_*) and nodrift
-   (nodrift_ppo_model_*) naming conventions.
-2. extract_run: reads the training run number from a checkpoint
-   filename, using the same naming conventions as extract_stage.
-3. resolve_checkpoint_paths: finds checkpoint .zip files based on a simple
-   instruction like "latest" or "run:safe_PPO_6". Supports both checkpoint
-   families automatically.
-4. _find_checkpoints_in_folder: internal helper that searches a folder for
-   checkpoint files, trying drift, nodrift, and fallback patterns in order.
-5. patch_unsafe_termination: fixes episodes ending too early during
-   evaluation because of a training-only safety rule.
-6. classify_failure: returns a short word describing why an episode
-   failed (for example, "crash" or "timeout"). For use with DriftTestEnv;
-   see classify_failure_nodrift in checkpoint_test.py for nodrift agents.
+1. detect_agent_mode / resolve_agent_mode: infer the agent family from a
+   checkpoint path, or validate an explicit mode.
+2. _folder_run_number: reads the run number from a checkpoint's parent folder.
+3. _parse_checkpoint: splits a filename into (run, stage, epoch), for
+   all supported formats.
+4. extract_stage / extract_run: read the stage or run number from a
+   checkpoint filename (drift or nodrift naming).
+5. resolve_checkpoint_paths: finds checkpoint .zip files from a simple
+   instruction like "latest" or "run:safe_PPO_6".
+6. _find_checkpoints_in_folder: internal helper, tries drift, nodrift, and
+   fallback patterns in order.
+7. patch_unsafe_termination: fixes episodes ending too early during eval
+   because of a training-only safety rule.
+8. classify_failure: short word for why an episode failed ("crash",
+   "timeout"). For DriftTestEnv; see classify_failure_nodrift in
+   checkpoint_test.py for nodrift agents.
 """
 
+import re
 import glob
 import os
 
 from numpy.linalg import norm as _norm
 
+# Matches the run number in a run folder's own name, e.g. "safe_PPO_15"
+# -> 15, "nodrift_curriculum_PPO_14" -> 14. This is the base for
+# the run number: unlike the numbers embedded in a checkpoint filename,
+# the folder name is generally not ambiguous.
+_FOLDER_RUN_RE = re.compile(r"_(\d+)$")
+
+
+def detect_agent_mode(model_path):
+    """Detect whether a checkpoint belongs to the drift or nodrift family.
+
+    Args:
+        model_path: Full path to a checkpoint file.
+
+    Returns:
+        "nodrift" if the path contains "nodrift", otherwise "drift".
+    """
+    path_lower = model_path.lower()
+    if "nodrift" in path_lower:
+        return "nodrift"
+    return "drift"
+
+
+def resolve_agent_mode(agent_mode, model_path=None):
+    """Resolve the active agent mode, supporting an automatic default.
+
+    Args:
+        agent_mode: "drift", "nodrift", or "auto".
+        model_path: Checkpoint path used when agent_mode is "auto".
+
+    Returns:
+        "drift" or "nodrift".
+
+    Raises:
+        ValueError: If agent_mode is invalid or "auto" has no model path.
+    """
+    if agent_mode in ("drift", "nodrift"):
+        return agent_mode
+
+    if agent_mode != "auto":
+        raise ValueError(
+            f"Unknown AGENT_MODE: {agent_mode!r}. Use 'drift', 'nodrift', or 'auto'."
+        )
+
+    if model_path is None:
+        raise ValueError("AGENT_MODE='auto' requires a checkpoint path to detect from.")
+
+    return detect_agent_mode(model_path)
+
+
+def _folder_run_number(path):
+    """Read the run number out of a checkpoint's parent folder name.
+
+    Args:
+        path: Full file path to a checkpoint file.
+
+    Returns:
+        The run number as an integer, or -1 if the parent folder name
+        does not end in "_<number>".
+    """
+    folder_name = os.path.basename(os.path.dirname(path))
+    match = _FOLDER_RUN_RE.search(folder_name)
+    return int(match.group(1)) if match else -1
+
+
+def _parse_checkpoint(path):
+    """Split a checkpoint filename into (run, stage, epoch).
+
+    Three filename types have been used over time, and the
+    numbers alone don't say which shape a given file is (all three are
+    just plain integers, so trying parts[-2] before parts[-3] as a
+    "fallback" can return the wrong number instead of failing):
+        1. {prefix}_model_{run}_{stage}_{epoch}.zip   (current format)
+        2. {prefix}_model_{stage}_{run}_{epoch}.zip   (previous format,
+           stage/run swapped, rename_checkpoints.py migrates it)
+        3. {prefix}_model_{stage}_{run}.zip           (earliest format,
+           from before epoch checkpoints existed at all, e.g. safe_PPO_1..6:
+           one file per stage, no epoch number in the filename)
+    To disambiguate 1 vs. 2, this compares each candidate number against
+    the run number in the parent folder name (e.g. "safe_PPO_15" -> 15),
+    which is unambiguous. Shape 3 is identified by only having two
+    trailing numbers instead of three; its epoch is reported as 0 since
+    the filename has no epoch to read, matching the "missing epoch"
+    default used elsewhere in this file (see get_epoch in
+    _find_checkpoints_in_folder).
+
+    Args:
+        path: Full file path to a checkpoint file.
+
+    Returns:
+        A (run, stage, epoch) tuple of integers. Any field that could not
+        be determined is -1.
+    """
+    filename = os.path.basename(path).replace(".zip", "")
+    parts = filename.split("_")
+    folder_run = _folder_run_number(path)
+
+    # Collect the trailing numeric parts, e.g.
+    # ["safe", "ppo", "model", "12", "6", "9"] -> ["12", "6", "9"]
+    trailing = []
+    for part in reversed(parts):
+        if not part.lstrip("-").isdigit():
+            break
+        trailing.append(part)
+    trailing.reverse()
+
+    if len(trailing) == 3:
+        first, second, epoch = (int(p) for p in trailing)
+        # Whichever of the two leading numbers matches the folder's own
+        # run number is the run; the other is the stage. Default to the
+        # current format (run_stage_epoch) if the folder name gives no
+        # run number to check against, or if neither number matches it.
+        if second == folder_run:
+            return second, first, epoch
+        return first, second, epoch
+
+    if len(trailing) == 2:
+        # Earliest format: {stage}_{run}, no epoch number existed yet.
+        # Prefer the folder's own run number, since it's unambiguous;
+        # this filename's own run number should already agree with it,
+        # but fall back to reading it straight from the filename if the
+        # folder name didn't end in "_<number>" for some reason.
+        stage, embedded_run = (int(p) for p in trailing)
+        run = folder_run if folder_run != -1 else embedded_run
+        return run, stage, 0
+
+    return -1, -1, -1
+
 
 def extract_stage(path):
     """Read the curriculum stage number out of a checkpoint filename.
 
-    Handles the naming convention used in this project:
-        safe_ppo_model_{run}_{stage}_{epoch}.zip
-        nodrift_ppo_model_{run}_{stage}_{epoch}.zip
-    The run number comes first, then the stage number, then the epoch
-    number. Stage is the second-to-last number: parts[-2].
-
-    An older format, safe_ppo_model_{stage}_{run}_{epoch}.zip, with the
-    stage and run numbers swapped, is also supported as a fallback for
-    any checkpoints that have not been migrated: stage is parts[-3].
-
-    For other filenames like "final_model.zip" that have no stage number,
-    -1 is returned instead of crashing so the caller can decide how to
-    handle it.
+    See _parse_checkpoint for the filename formats this handles.
 
     Args:
         path: Full file path to a checkpoint file.
@@ -55,43 +172,13 @@ def extract_stage(path):
         The stage number as an integer. Returns -1 if the filename does
         not match any expected pattern.
     """
-    # Strip the folder path and the .zip ending, then split on "_".
-    # "safe_ppo_model_12_6_9.zip" -> ["safe", "ppo", "model", "12", "6", "9"]
-    # "nodrift_ppo_model_2_4_40.zip" -> ["nodrift", "ppo", "model", "2", "4", "40"]
-    filename = os.path.basename(path).replace(".zip", "")
-    parts = filename.split("_")
-
-    # Current format: {prefix}_model_{run}_{stage}_{epoch}. Stage is
-    # second from the end. This is checked first since it is the format
-    # used by both drift_initial_trainer.py and nodrift_initial_trainer.py
-    try:
-        return int(parts[-2])
-    except (IndexError, ValueError):
-        pass
-
-    # Fallback for the previous format with stage and run swapped:
-    # {prefix}_model_{stage}_{run}_{epoch}. Stage is third from the end.
-    # TODO: this fallback can be removed once no checkpoints in the
-    # previous format remain in the repository.
-    try:
-        return int(parts[-3])
-    except (IndexError, ValueError):
-        # Neither pattern matched. Return -1 instead of crashing so the
-        # caller can decide how to handle a bad filename.
-        return -1
+    return _parse_checkpoint(path)[1]
 
 
 def extract_run(path):
     """Read the run number out of a checkpoint filename.
 
-    Handles the naming convention used in this project:
-        safe_ppo_model_{run}_{stage}_{epoch}.zip
-        nodrift_ppo_model_{run}_{stage}_{epoch}.zip
-    The run number is the third-to-last number: parts[-3].
-
-    An older format, safe_ppo_model_{stage}_{run}_{epoch}.zip, with the
-    stage and run numbers swapped, is also supported as a fallback for
-    any checkpoints that have not been migrated: run is parts[-2].
+    See _parse_checkpoint for the filename formats this handles.
 
     Args:
         path: Full file path to a checkpoint file.
@@ -100,24 +187,7 @@ def extract_run(path):
         The run number as an integer. Returns -1 if the filename does
         not match any expected pattern.
     """
-    filename = os.path.basename(path).replace(".zip", "")
-    parts = filename.split("_")
-
-    # Current format: {prefix}_model_{run}_{stage}_{epoch}. Run is third
-    # from the end.
-    try:
-        return int(parts[-3])
-    except (IndexError, ValueError):
-        pass
-
-    # Fallback for the previous format with stage and run swapped:
-    # {prefix}_model_{stage}_{run}_{epoch}. Run is second from the end.
-    # TODO: this fallback can be removed once no checkpoints in the
-    # previous format remain in the repository.
-    try:
-        return int(parts[-2])
-    except (IndexError, ValueError):
-        return -1
+    return _parse_checkpoint(path)[0]
 
 
 def resolve_checkpoint_paths(checkpoint_spec, checkpoint_root, num_models=1):
@@ -405,7 +475,7 @@ def patch_unsafe_termination(env):
         return tot_step_rew, term, trunc
 
     inner_env.rewards = _patched_rewards
-    print("  [patch] Disabled early speed-based termination for evaluation.")
+    print("  [Patch] Disabled early speed-based termination for evaluation.")
 
 
 def classify_failure(env):
@@ -424,13 +494,17 @@ def classify_failure(env):
             right when the episode ended.
 
     Returns:
-        A short string: "crash", "out_of_bounds", "fuel", "timeout", or
-        "unknown" if none of those apply.
+        A short string: "crash", "unsafe", "out_of_bounds", "fuel",
+        "timeout", or "unknown" if none of those apply.
     """
     inner_env = env.env
 
     if inner_env.is_crashed():
         return "crash"
+    # drift_env terminates on any speed-limit violation; without this
+    # check those episodes would all report as "unknown".
+    if inner_env.is_unsafe():
+        return "unsafe"
     if inner_env.is_out_of_bounds():
         return "out_of_bounds"
     if inner_env.is_out_of_fuel():

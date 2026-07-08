@@ -1,33 +1,34 @@
 """
 rename_checkpoints.py
 
-IMPORTANT: RUN THIS SCRIPT WITH --apply ONLY ONCE.
-Why: it renames files in place, and running it again can cause
-confusion or unintended renames once the codebase has moved to the
-new filename format.
+Migration script that renames every checkpoint under data/checkpoints to
+this project's canonical format: {prefix}_model_{run}_{stage}_{epoch}.zip
 
-One-time migration script. Renames every checkpoint file from the old
-naming format to the new naming format:
+Older formats it handles (see evaluation_utilities.py for the full history):
+    - {prefix}_model_{stage}_{run}_{epoch}.zip  (stage/run swapped)
+    - {prefix}_model_{stage}_{run}.zip          (earliest, no epoch yet)
 
-    Old: {prefix}_model_{stage}_{run}_{epoch}.zip
-    New: {prefix}_model_{run}_{stage}_{epoch}.zip
+Reads each file's (run, stage, epoch) via evaluation_utilities.
+_parse_checkpoint rather than re-guessing the format itself. That
+function clarifies the current vs. swapped 3-number formats by
+cross-checking the run number against the checkpoint's own parent
+folder name (example: "safe_PPO_15" -> run 15).
 
-This swaps the order of the stage and run numbers so the run number
-comes first, making it easier to track which files belong to the same
-training run when looking at a flat list of filenames.
-
-Run it once before switching extract_stage() and the training scripts
-over to the new format. After running, verify a few folders by hand
-before deleting this script or running it again.
+This makes the script safe to run on a mix of migrated and not-yet-migrated 
+folders: a file already in canonical format parses back to the same 
+(run, stage, epoch), so its target filename matches its current one and it 
+is left alone.
 
 Usage:
-    python rename_checkpoints.py          # dry run, only prints what would happen
-    python rename_checkpoints.py --apply  # actually renames the files
+    python rename_checkpoints.py          # Dry run, only prints what would happen
+    python rename_checkpoints.py --apply  # Actually renames the files
 """
 
 import os
 import sys
 from pathlib import Path
+
+from evaluation_utilities import _parse_checkpoint
 
 BASE_DIR = Path(__file__).resolve().parent
 CHECKPOINT_ROOT = BASE_DIR / "data" / "checkpoints"
@@ -35,38 +36,6 @@ CHECKPOINT_ROOT = BASE_DIR / "data" / "checkpoints"
 # Prefixes this script knows how to rename. Add to this list if a new
 # checkpoint family is introduced later.
 KNOWN_PREFIXES = ["safe_ppo_model", "nodrift_ppo_model"]
-
-
-def parse_old_filename(filename: str):
-    """Parse a checkpoint filename in the old stage_run_epoch format.
-
-    Args:
-        filename: Filename without the .zip extension, for example
-            "safe_ppo_model_6_12_9".
-
-    Returns:
-        A tuple of (prefix, stage, run, epoch) if the filename matches
-        a known prefix and has exactly three trailing numbers. Returns
-        None if the filename does not match the expected pattern.
-    """
-    for prefix in KNOWN_PREFIXES:
-        if not filename.startswith(prefix + "_"):
-            continue
-
-        remainder = filename[len(prefix) + 1:]
-        parts = remainder.split("_")
-
-        if len(parts) != 3:
-            continue
-
-        try:
-            stage, run, epoch = (int(p) for p in parts)
-        except ValueError:
-            continue
-
-        return prefix, stage, run, epoch
-
-    return None
 
 
 def main():
@@ -77,6 +46,7 @@ def main():
         return
 
     total_renamed = 0
+    total_unchanged = 0
     total_skipped = 0
 
     # Walk every run folder under data/checkpoints.
@@ -86,18 +56,34 @@ def main():
 
         for checkpoint_file in sorted(run_folder.glob("*.zip")):
             filename = checkpoint_file.stem  # filename without .zip
-            parsed = parse_old_filename(filename)
 
-            if parsed is None:
+            prefix = next(
+                (p for p in KNOWN_PREFIXES if filename.startswith(p + "_")), None
+            )
+            if prefix is None:
                 # Does not match a known checkpoint naming pattern.
                 # Likely something like final_model.zip; leave it alone.
                 print(f"  Skipping (no match): {checkpoint_file.name}")
                 total_skipped += 1
                 continue
 
-            prefix, stage, run, epoch = parsed
+            run, stage, epoch = _parse_checkpoint(str(checkpoint_file))
+            if -1 in (run, stage, epoch):
+                # Prefix matched but the trailing numbers didn't parse
+                # into a complete (run, stage, epoch). Leave it alone
+                # rather than guessing.
+                print(f"  Skipping (could not parse): {checkpoint_file.name}")
+                total_skipped += 1
+                continue
+
             new_filename = f"{prefix}_{run}_{stage}_{epoch}.zip"
             new_path = checkpoint_file.parent / new_filename
+
+            if new_path == checkpoint_file:
+                # Already in the canonical format. This is what makes
+                # the script idempotent: nothing to rename here.
+                total_unchanged += 1
+                continue
 
             if new_path.exists():
                 print(f"  SKIP, target already exists: {new_path.name}")
@@ -112,6 +98,7 @@ def main():
             total_renamed += 1
 
     print(f"\n{'Renamed' if apply_changes else 'Would rename'}: {total_renamed} files")
+    print(f"Already correct: {total_unchanged} files")
     print(f"Skipped: {total_skipped} files")
 
     if not apply_changes:
