@@ -91,7 +91,7 @@ class SpaceCraftDockingEnv3D(gym.Env):
         super().reset(seed=seed)
         np.random.seed(seed)
         info = {}
-        if self.fixed_start:  # TODO will need to add fuel used and time step
+        if self.fixed_start:
             self.state = np.copy(self.fixed_state)
         else:
             self.state = self.sample_state_space()
@@ -253,7 +253,7 @@ class DriftTrainEnv(gym.Env):
         """Standard Gymnasium step function."""
         obs, rew, term, trunc, info = self.env.step(action)
         done = term or trunc
-        if done and self.env.only_oot():   # not done or self.env....
+        if (not done) or (self.env.only_oot()):
             is_drift, the_time = self.det_drift()
             if is_drift:
                 rew += 10
