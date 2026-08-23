@@ -1,31 +1,22 @@
-"""
-checkpoint_test.py
+"""Evaluate one trained checkpoint over several episodes.
 
-Evaluates a single trained checkpoint over several episodes: win rate,
-failure reasons, a 3D trajectory plot, and a JSON results file. Supports
-both drift-assisted and direct-docking (nodrift) checkpoints; set
-AGENT_MODE below to match the model being evaluated.
+Reports:
+- Win rate and failure reasons
+- A 3D trajectory plot
+- A JSON results file
+- Drift and nodrift checkpoint support
 
-Checkpoint finding, the early-termination patch, and failure
-classification are shared with curriculum_evaluation.py through
-evaluation_utilities.py.
+Set AGENT_MODE to drift, nodrift, or auto. Auto detects the mode from
+the filename.
 
-Limitations:
-  - Evaluates ONE stage in isolation, using that stage's own training
-    config. Many drift stages train with a short max_episode_len (5-10
-    steps) and a wide pos_thresh, so the lookahead can find a drift
-    opportunity almost immediately. That is expected, not a bug.
-  - For a full mission-level run, use drift_full_test.py instead. It
-    chains all five stage models from 100-150m down to the final 0.5m dock.
-  - Best used as a diagnostic tool to confirm one checkpoint behaves
-    correctly in its own training environment. Also useful for nodrift
-    agents, whose longer episodes make for more interesting trajectories
-    even at a single stage.
+Best for NODRIFT checkpoints. One DRIFT stage is only part of a chained
+curriculum, not a complete docking policy. Use drift_full_test.py for a
+full drift evaluation.
 
-Fuel note: reported fuel is raw sum(linalg.norm(action)) across all
-steps, not delta-V. Convert with delta_V = fuel_here / mass (12 kg).
-drift_full_test.py reports true delta-V directly; use it for fuel
-comparisons between drift and nodrift agents.
+Fuel metrics:
+1. Delta-v, per-axis sum (L1): primary metric for three fixed thrusters.
+2. Delta-v, vector norm (L2): secondary metric for one gimbaled thruster.
+3. Action magnitude: raw action size, not a fuel metric; kept for older logs.
 """
 
 import os
@@ -39,60 +30,80 @@ import numpy as np
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 
+import drift_env
+import docking_env
 from evaluation_utilities import (
     resolve_checkpoint_paths,
     resolve_agent_mode,
     patch_unsafe_termination,
     classify_failure,
+    classify_failure_nodrift,
+    resolve_obs_flags,
+    resolve_env_flags_from_metadata,
+    resolve_env_config_best_effort,
+    center_matplotlib_window,
+    should_show_plot,
+    plural_word,
+    interquartile_mean,
+    resolve_and_print_seed,
+    write_tidy_csv,
+    format_win_rate,
+    set_equal_3d_axes,
+    SPACE_CONTROLS_FLAG_KEYS,
+    NODRIFT_REWARD_FLAG_KEYS,
+    DRIFT_REWARD_FLAG_KEYS,
+    MAX_STEPS_PER_EPISODE,
 )
 
-# AGENT MODE
-# "drift"    -> uses DriftTestEnv from drift_env.py (drift-assisted agent)
-# "nodrift"  -> uses SpaceCraftDockingEnv3D from docking_env.py (direct-docking agent)
-# "auto"     -> detects from checkpoint filename: "nodrift" in name -> nodrift, else drift
+# --- Settings ---
+# Grouped by what they affect; execution starts below.
+
+# Checkpoints:
+
+# Which checkpoint to evaluate.
+#   "latest"                       newest .zip in the newest run folder
+#   "run:<folder>" or a folder     newest .zip in that folder
+#   "pattern:<glob>"               custom glob, e.g. *_6_*.zip for stage 6
+#   an exact .zip path             that one checkpoint
+CHECKPOINT = "latest"
+
+# Only used when CHECKPOINT is "latest": restricts which run folders count,
+# so "latest" tracks the newest drift or nodrift run specifically instead
+# of whichever folder is newest on disk.
+LATEST_FOLDER_PREFIX = "nodrift"  # "drift" or "nodrift"
+
+# Which environment to build.
+#   "drift"    DriftTestEnv
+#   "nodrift"  SpaceCraftDockingEnv3D
+#   "auto"     detect from the filename ("nodrift" in name -> nodrift)
 AGENT_MODE = "auto"
 
-# CHECKPOINT CONFIG
-# "latest"                            -> newest .zip in the most recent run folder
-# "run:nodrift_curriculum_PPO_13"     -> newest .zip inside that exact run folder
-# "data/checkpoints/safe_PPO_16"      -> newest .zip in this folder
-# "pattern:safe_ppo_model_*_6_*.zip"  -> custom glob inside the checkpoint root, matches stage 6
-# r"C:\...\checkpoint.zip"            -> exact path to one checkpoint file
+# Run setup:
 
-# The default below points at the current drift curriculum run in this
-# workspace. Change the run folder name, use "latest", or provide an exact
-# path to evaluate a different checkpoint.
-CHECKPOINT = "run:safe_PPO_16"  # default: most recent drift curriculum run
+# Number of episodes to run.
+NUM_EPISODES = 30
 
-NUM_EPISODES = 10
+# Seed for episodes.
+# None:   pick a random seed, printed at startup so the run is reproducible.
+# An int: fix to a specific run.
+SEED = None  # example: 12345
 
-# ENV_CONFIG sets the evaluation environment parameters.
-# These should match the curriculum stage the model was trained on.
-# See drift_initial_trainer.py or nodrift_initial_trainer.py get_curriculum()
-# for the exact values used at each stage.
+# True:  display a window for each plot.
+# False: save the PNG to saved_figures/ and skip the window.
+SHOW_PLOTS = True
 
-# Nodrift long curriculum stages:
-#   stage 0:  pos_thresh = 50,  speed_thresh = 0.30, threshold = 0.90
-#   stage 1:  pos_thresh = 25,  speed_thresh = 0.30, threshold = 0.90
-#   stage 2:  pos_thresh = 10,  speed_thresh = 0.25, threshold = 0.90
-#   stage 3:  pos_thresh = 5,   speed_thresh = 0.22, threshold = 0.85
-#   stage 4:  pos_thresh = 2.5, speed_thresh = 0.20, threshold = 0.85
-#   stage 5:  pos_thresh = 1,   speed_thresh = 0.20, threshold = 0.85
-#   stage 6:  pos_thresh = 0.5, speed_thresh = 0.20, threshold = 0.95
+# Environment config:
 
-# Curriculum values used by this evaluator:
-#   curriculum < 7  -> uses the matching nodrift stage from get_curriculum()
-#   curriculum >= 7 -> clamps to the final nodrift stage (stage 6)
+# Where the eval environment config comes from.
+# True:  resolve it from the checkpoint's own run_metadata.json, so it
+#        always matches what the model trained on. Falls back to
+#        ENV_CONFIG below (with a warning) for checkpoints with no metadata.
+# False: always use ENV_CONFIG below.
+AUTO_ENV_CONFIG = True
 
-# Final nodrift evaluation config:
-#   pos_thresh = 0.5, speed_thresh = 0.2
-#   min/max_init_pos_bound = 100 / 150
-#   max_init_vel_bound = 0.4, max_boundary_box = 200
-#   max_episode_len = 2000, max_control = 1.0, step_len = 1
-#   max_total_dv = 2500
-#   fixed_start = False, fixed_state = [100, 0, 0, 0, 0, 0, 0]
-
-# Modified drifter curriculum stages:
+# Manual fallback config, used only when AUTO_ENV_CONFIG is False or the
+# checkpoint has no metadata. Should match the trained stage (values live
+# in get_curriculum()). The example below is a drift curriculum stage.
 ENV_CONFIG = {
     "min_init_pos_bound": 100,
     "max_init_pos_bound": 150,
@@ -101,13 +112,49 @@ ENV_CONFIG = {
     "max_episode_len": 10,
     "max_lookahead_len": 50,
     "drift_step_len": 10,
-    "pos_thresh": 50,
+    "pos_thresh": 5,
     "speed_thresh": 0.4,
     "max_total_dv": 1000.0,
 }
 
-# Used only for the approximate delta-V conversion in this diagnostic script.
-SPACECRAFT_MASS_KG = 12
+# True:  exact closed-form CWH propagation instead of solve_ivp. Matches
+#        what the trainers use, and roughly 8x faster; agrees with
+#        solve_ivp to about 1e-11 m, far below any dock threshold.
+# False: solve_ivp (RK45), the same integrator the environments used to
+#        default to. Use this to check a result against the original solver.
+FAST_ANALYTIC_PROPAGATION = True
+drift_env.FAST_ANALYTIC_PROPAGATION = FAST_ANALYTIC_PROPAGATION
+docking_env.FAST_ANALYTIC_PROPAGATION = FAST_ANALYTIC_PROPAGATION
+
+# Drift only: resets the timestep counter (state[6]) to stay in the 5-10
+# range drift stages trained on. Kept only in this script, and makes its 
+# drift numbers non-comparable to the other eval scripts.
+DRIFT_TIMESTEP_CAP = 10
+
+# Visual override:
+# Widen the start range and episode length for a longer trajectory plot.
+# Nodrift only since drift stages train on short episode lengths (5-10 steps), 
+# so widening to 3,000 steps pushes obs[6] out of distribution.
+# True:  apply VISUAL_OVERRIDE_CONFIG below.
+# False: use the checkpoint's trained config.
+VISUAL_RANGE_OVERRIDE = False
+
+# Applied when VISUAL_RANGE_OVERRIDE is True. max_lookahead_len is
+# drift-only (SpaceCraftDockingEnv3D does not have this parameter), so 
+# it is added conditionally in make_env() rather than included here.
+VISUAL_OVERRIDE_CONFIG = {
+    "min_init_pos_bound": 100,
+    "max_init_pos_bound": 150,
+    "max_boundary_box": 200,
+    "max_episode_len": 3_000,
+}
+VISUAL_OVERRIDE_MAX_LOOKAHEAD_LEN = 300  # drift only
+
+# Saved output:
+# Formatted per-episode CSV under saved_data/, alongside the JSON summary.
+# True:  write it (see evaluation_utilities.write_tidy_csv).
+# False: skip it.
+EXPORT_RESULTS_CSV = True
 
 # Folder this script lives in, used to build paths to checkpoints,
 # saved figures, and saved results regardless of where the script is
@@ -116,26 +163,109 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CHECKPOINT_ROOT = os.path.join(SCRIPT_DIR, "data", "checkpoints")
 
 
-def make_env(mode: str):
+def resolve_env_config(model_path: str) -> tuple[dict, str, bool]:
+    """Resolve which environment config to evaluate a checkpoint with.
+
+    When AUTO_ENV_CONFIG is on, tries the checkpoint's own
+    run_metadata.json first, then a live get_curriculum() lookup where
+    that is safe (any drift checkpoint, or nodrift stage 0-3). Falls
+    back to the manual ENV_CONFIG below, marked unverified, only when
+    neither source resolves anything.
+
+    Args:
+        model_path: Full path to the checkpoint file being evaluated.
+
+    Returns:
+        A (config, source, verified) tuple; config is a dict ready to
+        pass as **kwargs to the matching environment class.
+    """
+    if AUTO_ENV_CONFIG:
+        resolved, source, verified = resolve_env_config_best_effort(
+            model_path, fallback_config=ENV_CONFIG
+        )
+        print(f"Env config: {source}")
+        # fixed_state is stored as a string in run_metadata.json.
+        # Drop it here; fixed_start remains False during evaluation.
+        resolved.pop("fixed_state", None)
+        return resolved, source, verified
+    return ENV_CONFIG, "manual ENV_CONFIG (AUTO_ENV_CONFIG is off)", False
+
+
+def make_env(mode: str, expected_obs_size: int = 7, model_path: str = None):
     """Create the evaluation environment for the given agent mode.
 
     Args:
         mode: "drift" for DriftTestEnv, "nodrift" for SpaceCraftDockingEnv3D.
+        expected_obs_size: The loaded model's observation_space size,
+            used to match the nodrift env's obs flags (see
+            resolve_obs_flags). Ignored for drift.
+        model_path: Full path to the checkpoint, used to auto-resolve
+            the environment config. Required when AUTO_ENV_CONFIG is True.
 
     Returns:
-        A Gymnasium environment instance configured with ENV_CONFIG.
+        A (env, config_source, config_verified) tuple.
 
     Raises:
         ValueError: If mode is not "drift" or "nodrift".
     """
+    env_config, source, verified = resolve_env_config(model_path)
+
+    if VISUAL_RANGE_OVERRIDE:
+        env_config = dict(env_config)
+        env_config.update(VISUAL_OVERRIDE_CONFIG)
+        if mode == "drift":
+            env_config["max_lookahead_len"] = VISUAL_OVERRIDE_MAX_LOOKAHEAD_LEN
+        print("Env config widened via VISUAL_RANGE_OVERRIDE.")
+
+    # space_controls_obs must be read BEFORE resolve_obs_flags: it subtracts an
+    # observation element, so size alone does not identify flags.
+    space_controls_flags = resolve_env_flags_from_metadata(model_path, keys=SPACE_CONTROLS_FLAG_KEYS)
+    space_controls_obs = space_controls_flags.get("space_controls_obs", False)
+    try:
+        saferl_obs, custom_braking_margin_obs = resolve_obs_flags(
+            expected_obs_size, space_controls_obs=space_controls_obs
+        )
+    except ValueError:
+        # Without run_metadata.json, space_controls_obs defaults to False.
+        # If the size is unreachable, try the only other valid setting.
+        flipped = not space_controls_obs
+        saferl_obs, custom_braking_margin_obs = resolve_obs_flags(
+            expected_obs_size, space_controls_obs=flipped
+        )
+        space_controls_flags["space_controls_obs"] = flipped
+        print(
+            f"  NOTE: obs size {expected_obs_size} is unreachable with "
+            f"space_controls_obs={space_controls_obs} (the default for a "
+            f"checkpoint with no recorded value); using "
+            f"space_controls_obs={flipped} instead, the only value that "
+            f"reaches this size."
+        )
+    # Reward-shape flags don't change observation size, so they must be read
+    # from metadata explicitly, or a checkpoint runs under the wrong reward.
     if mode == "drift":
         from drift_env import DriftTestEnv
-        return DriftTestEnv(**ENV_CONFIG)
+        reward_flags = resolve_env_flags_from_metadata(model_path, keys=DRIFT_REWARD_FLAG_KEYS)
+        env = DriftTestEnv(
+            saferl_obs=saferl_obs,
+            custom_braking_margin_obs=custom_braking_margin_obs,
+            **space_controls_flags,
+            **reward_flags,
+            **env_config,
+        )
     elif mode == "nodrift":
         from docking_env import SpaceCraftDockingEnv3D
-        return SpaceCraftDockingEnv3D(**ENV_CONFIG)
+        reward_flags = resolve_env_flags_from_metadata(model_path, keys=NODRIFT_REWARD_FLAG_KEYS)
+        env = SpaceCraftDockingEnv3D(
+            saferl_obs=saferl_obs,
+            custom_braking_margin_obs=custom_braking_margin_obs,
+            **space_controls_flags,
+            **reward_flags,
+            **env_config,
+        )
     else:
         raise ValueError(f"Unknown AGENT_MODE: {mode!r}. Use 'drift', 'nodrift', or 'auto'.")
+
+    return env, source, verified
 
 
 def check_win(env, mode: str) -> tuple[bool, str]:
@@ -170,28 +300,6 @@ def check_win(env, mode: str) -> tuple[bool, str]:
     return False, reason
 
 
-def classify_failure_nodrift(env) -> str:
-    """Classify why a nodrift episode failed.
-
-    Args:
-        env: A SpaceCraftDockingEnv3D instance after episode completion.
-
-    Returns:
-        A string describing the failure reason.
-    """
-    if env.is_crashed():
-        return "crash"
-    if env.vel_budget_exhausted():
-        return "unsafe"
-    if env.is_out_of_bounds():
-        return "out_of_bounds"
-    if env.is_out_of_fuel():
-        return "fuel"
-    if env.is_out_of_time():
-        return "timeout"
-    return "unknown"
-
-
 def find_model_path() -> str:
     """Resolve CHECKPOINT into a single checkpoint file path.
 
@@ -202,7 +310,7 @@ def find_model_path() -> str:
         FileNotFoundError: If CHECKPOINT does not resolve to any file.
     """
     checkpoint_files = resolve_checkpoint_paths(
-        CHECKPOINT, CHECKPOINT_ROOT, num_models=1
+        CHECKPOINT, CHECKPOINT_ROOT, num_models=1, folder_prefix=LATEST_FOLDER_PREFIX
     )
     if not checkpoint_files:
         raise FileNotFoundError(f"No checkpoints resolved for: {CHECKPOINT}")
@@ -210,8 +318,9 @@ def find_model_path() -> str:
 
 
 def get_next_figure_number(save_dir: str) -> int:
-    """Find the next unused figure number so saved plots do not overwrite
-    each other.
+    """Find the next unused figure number.
+
+    Keeps saved plots from overwriting each other.
 
     Args:
         save_dir: Folder where trajectory plots are saved.
@@ -237,16 +346,14 @@ def get_next_figure_number(save_dir: str) -> int:
     return max(numbers) + 1 if numbers else 1
 
 
-def plot_trajectories(trajectories, episode_outcomes, model_name, model_path, num_episodes):
+def plot_trajectories(trajectories, episode_outcomes, model_name, model_path, num_episodes,
+                      seed=None, show=True):
     """Plot 3D trajectories colored by outcome and save the figure to disk.
 
-    Blue trajectories are wins (direct dock or drift success), red
-    trajectories are losses (crash, timeout, out of bounds, out of fuel).
-
-    Note: trajectories from single-stage drift evaluation are typically
-    very short (5-10 steps) and show minimal movement because the drift
-    lookahead works almost immediately. Use drift_full_test.py for
-    trajectories that show a full long-range approach.
+    Blue is a win (direct dock or drift success), red is a loss (crash,
+    timeout, out of bounds, out of fuel). A single drift stage's
+    trajectory is typically very short (5-10 steps); use
+    drift_full_test.py for a full long-range approach.
 
     Args:
         trajectories: One trajectory per episode. Each trajectory is
@@ -257,6 +364,10 @@ def plot_trajectories(trajectories, episode_outcomes, model_name, model_path, nu
         model_path: Full path to the model file, used to label which run
             folder this plot came from.
         num_episodes: Total number of episodes run, used in the title.
+        seed: The resolved seed, noted in the title so the figure records
+            which run produced it.
+        show: False saves the PNG without popping up a window (also
+            skipped automatically under a headless Matplotlib backend).
     """
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111, projection="3d")
@@ -270,7 +381,7 @@ def plot_trajectories(trajectories, episode_outcomes, model_name, model_path, nu
     for trajectory, outcome in zip(trajectories, episode_outcomes):
         traj = np.array(trajectory)
 
-        # Pad single-point trajectories so matplotlib can draw them.
+        # Pad single-point trajectories so Matplotlib can draw them.
         if len(traj) < 2:
             traj = np.vstack([traj[0], traj[0] + 1e-6])
 
@@ -293,24 +404,18 @@ def plot_trajectories(trajectories, episode_outcomes, model_name, model_path, nu
 
     # Force equal and symmetric axis ranges so the chief sits at the center.
     all_points = np.concatenate([np.array(t) for t in trajectories if len(t) > 0])
-    max_extent = np.max(np.abs(all_points))
-    ax.set_xlim(-max_extent, max_extent)
-    ax.set_ylim(-max_extent, max_extent)
-    ax.set_zlim(-max_extent, max_extent)
-
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_zlabel("Z (m)")
+    set_equal_3d_axes(ax, all_points)
     run_folder = os.path.basename(os.path.dirname(model_path))
     wins_count = sum(1 for o in episode_outcomes if o in ("direct_dock", "drift_success"))
+    seed_note = f" (seed {seed})" if seed is not None else ""
     ax.set_title(
-        f"Checkpoint Trajectories - {run_folder}/{model_name}\n"
-        f"{num_episodes} Episodes, Win rate: {wins_count}/{num_episodes}"
+        f"Checkpoint Trajectories - {run_folder}/{model_name}{seed_note}\n"
+        f"{num_episodes} {plural_word(num_episodes, 'Episode')}, Win rate: {wins_count}/{num_episodes}"
     )
     ax.legend(loc="upper left")
     plt.tight_layout()
 
-    save_dir = os.path.join(SCRIPT_DIR, "saved_figures")
+    save_dir = os.path.join(SCRIPT_DIR, "saved_figures", "checkpoint_test")
     os.makedirs(save_dir, exist_ok=True)
 
     figure_num = get_next_figure_number(save_dir)
@@ -320,8 +425,12 @@ def plot_trajectories(trajectories, episode_outcomes, model_name, model_path, nu
     )
 
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    print(f"\nSaved trajectory plot:\n{save_path}")
-    plt.show()
+    print()
+    print(f"Saved trajectory plot:\n{save_path}")
+    if should_show_plot(show):
+        center_matplotlib_window()
+        plt.show()
+    plt.close()
 
 
 def evaluate_model(fix_unsafe: bool = True):
@@ -335,16 +444,27 @@ def evaluate_model(fix_unsafe: bool = True):
     model_path = find_model_path()
     print(f"Loading model:\n{model_path}\n")
 
+    # Resolve the seed before PPO.load(): load() reseeds NumPy's global
+    # RNG from the checkpoint's saved seed, so order is significant here.
+    resolved_seed = resolve_and_print_seed(SEED)
+
     # Resolve the agent mode from the config or the checkpoint filename.
     mode = resolve_agent_mode(AGENT_MODE, model_path)
-    print(f"Agent mode: {mode}\n")
+    print(f"Agent mode: {mode}")
+    if mode == "drift":
+        print(
+            "  NOTE: a single drift stage is not a standalone docking "
+            "policy; these numbers reflect one stage in isolation. "
+            "\n  Use drift_full_test.py (chained) for real drift evaluation."
+        )
+    print(f"{plural_word(NUM_EPISODES, 'Episode') + ':':<12}{NUM_EPISODES}\n")
 
     model = PPO.load(model_path, device="cpu")
-    env = make_env(mode)
 
     # Detect how many observation elements the model expects.
     # Models trained before the 7-element state update expect 6 elements.
     expected_obs_size = model.observation_space.shape[0]
+    env, config_source, config_verified = make_env(mode, expected_obs_size, model_path)
 
     if fix_unsafe and mode == "drift":
         # During evaluation, ignore the training-only unsafe termination
@@ -364,13 +484,15 @@ def evaluate_model(fix_unsafe: bool = True):
     }
 
     fuels = []
+    true_fuels = []
+    true_fuels_l1 = []
     timesteps = []
     start_dists = []
     end_dists = []
     trajectories = []
     episode_outcomes = []
 
-    # |a| sum = raw action magnitude sum, not delta-V. See FUEL NOTE in docstring.
+    # |a| sum = raw action magnitude sum, not Delta-v.
     print(
         f"{'Ep':>4}  {'Start':>8}  {'End':>8}  {'Delta':>8}  "
         f"{'Steps':>6}  {'|a| sum':>9}  {'|a|/step':>10}  Result"
@@ -379,7 +501,7 @@ def evaluate_model(fix_unsafe: bool = True):
     print("-" * 75)
 
     for episode in range(NUM_EPISODES):
-        obs, _ = env.reset()
+        obs, _ = env.reset(seed=resolved_seed + episode)
         done = False
         episode_steps = 0
         episode_action_magnitude = 0
@@ -387,7 +509,18 @@ def evaluate_model(fix_unsafe: bool = True):
         start_distance = np.linalg.norm(inner_env.state[0:3])
 
         while not done:
-            action, _ = model.predict(obs[:expected_obs_size], deterministic=True)
+            # Keep the drift timestep counter within the 5-10 step range
+            # the model trained on. Matches drift_full_test.py's limit.
+            if mode == "drift" and inner_env.state[6] >= DRIFT_TIMESTEP_CAP:
+                inner_env.state[6] = 0
+
+            if mode == "drift" and env.is_drifting:
+                # Once det_drift() signals a coast win, hold zero thrust
+                # instead of asking the policy again, or fuel use gets
+                # overstated.
+                action = np.array([0.0, 0.0, 0.0])
+            else:
+                action, _ = model.predict(obs[:expected_obs_size], deterministic=True)
             # Backwards compatibility: older nodrift models expect 6-element obs, newer ones expect 7 or 9.
 
             # Suppress environment prints (WIN!, UNSAFE!) so only this
@@ -396,13 +529,20 @@ def evaluate_model(fix_unsafe: bool = True):
                 obs, reward, terminated, truncated, info = env.step(action)
 
             trajectory.append(inner_env.state[0:3].copy())
-            # Raw action magnitude, not delta-V. Divide by 12 for delta-V.
+            # Raw action magnitude, not Delta-v. Divide by 12 for Delta-v.
             episode_action_magnitude += np.linalg.norm(action)
             episode_steps += 1
             done = terminated or truncated
+            if episode_steps >= MAX_STEPS_PER_EPISODE:
+                break
 
         end_distance = np.linalg.norm(inner_env.state[0:3])
-        is_win, outcome = check_win(env, mode)
+        if not done:
+            # Loop exited via the MAX_STEPS_PER_EPISODE limit, not a valid
+            # ending, so classify it as a timeout.
+            is_win, outcome = False, "timeout"
+        else:
+            is_win, outcome = check_win(env, mode)
 
         if is_win:
             wins += 1
@@ -424,6 +564,10 @@ def evaluate_model(fix_unsafe: bool = True):
         )
 
         fuels.append(episode_action_magnitude)
+        # fuel_used_l1 (per-axis sum) is the primary fuel metric;
+        # fuel_used (vector norm) is secondary. See module docstring.
+        true_fuels.append(inner_env.fuel_used)
+        true_fuels_l1.append(inner_env.fuel_used_l1)
         timesteps.append(episode_steps)
         start_dists.append(start_distance)
         end_dists.append(end_distance)
@@ -432,24 +576,29 @@ def evaluate_model(fix_unsafe: bool = True):
 
     env.close()
 
-    print(f"\n--- Evaluation Summary ---")
+    print()
+    print(f"--- Evaluation Summary ---")
     print(
         f"Model:          "
         f"{os.path.basename(os.path.dirname(model_path))}/"
         f"{os.path.basename(model_path)}"
     )
     print(f"Agent mode:     {mode}")
-    print(f"Episodes:       {NUM_EPISODES}")
-    print(f"Win Rate:       {wins}/{NUM_EPISODES}  ({100*wins/NUM_EPISODES:.1f}%)")
+    print(f"{plural_word(NUM_EPISODES, 'Episode') + ':':<16}{NUM_EPISODES}")
+    print(f"Seed:           {resolved_seed}")
+    print(f"Win Rate:       {format_win_rate(wins, NUM_EPISODES)}")
     print(f"  Direct docks: {direct_docks}")
     # Only show drift wins line when evaluating a drift agent.
     if mode == "drift":
         print(f"  Drift wins:   {drift_wins}")
 
     print("\nFailure breakdown:")
-    for reason, count in failure_counts.items():
-        if count:
-            print(f"  {reason:<16} {count}")
+    if any(failure_counts.values()):
+        for reason, count in failure_counts.items():
+            if count:
+                print(f"  {reason:<16} {count}")
+    else:
+        print("  N/A")
 
     print(
         f"\nTimesteps:  mean={np.mean(timesteps):.1f}  std={np.std(timesteps):.1f}  "
@@ -457,15 +606,21 @@ def evaluate_model(fix_unsafe: bool = True):
     )
     print(f"  Per episode: {timesteps}")
 
-    # Fuel here is raw action magnitude, not delta-V.
-    # Approx delta-V = fuel / SPACECRAFT_MASS_KG (step_len = 1 s).
-    # Use drift_full_test.py for true delta-V comparisons between agents.
+    # "|a| sum" is the raw action-norm sum, not a fuel metric; the two
+    # Delta-v lines below are the real fuel numbers, from fuel_used(_l1).
     print(
-        f"Fuel (|a| sum): mean={np.mean(fuels):.3f}  std={np.std(fuels):.3f}  "
-        f"min={np.min(fuels):.3f}  max={np.max(fuels):.3f}"
+        f"Action magnitude (|a| sum, not fuel): mean={np.mean(fuels):.3f}  "
+        f"std={np.std(fuels):.3f}  min={np.min(fuels):.3f}  max={np.max(fuels):.3f}"
     )
-    print(f"  Approx delta-V (m/s): mean={np.mean(fuels)/SPACECRAFT_MASS_KG:.4f}  "
-          f"median={np.median(fuels)/SPACECRAFT_MASS_KG:.4f}")
+    # IQM (interquartile mean) reported alongside mean/median to match
+    # DRL for Space Controls (2024)'s statistics (see evaluation_utilities). 
+    # L1 first: it is the primary fuel metric.
+    print(f"Delta-v, per-axis sum (L1, m/s): mean={np.mean(true_fuels_l1):.4f}  "
+          f"median={np.median(true_fuels_l1):.4f}  iqm={interquartile_mean(true_fuels_l1):.4f}  "
+          f"std={np.std(true_fuels_l1):.4f}")
+    print(f"Delta-v, vector norm (L2, m/s):  mean={np.mean(true_fuels):.4f}  "
+          f"median={np.median(true_fuels):.4f}  iqm={interquartile_mean(true_fuels):.4f}  "
+          f"std={np.std(true_fuels):.4f}")
 
     print(f"Start dist: mean={np.mean(start_dists):.2f}  std={np.std(start_dists):.2f}")
     print(f"End dist:   mean={np.mean(end_dists):.2f}  std={np.std(end_dists):.2f}")
@@ -475,7 +630,8 @@ def evaluate_model(fix_unsafe: bool = True):
     )
 
     plot_trajectories(
-        trajectories, episode_outcomes, os.path.basename(model_path), model_path, NUM_EPISODES
+        trajectories, episode_outcomes, os.path.basename(model_path), model_path,
+        NUM_EPISODES, seed=resolved_seed, show=SHOW_PLOTS
     )
 
     results_dir = os.path.join(SCRIPT_DIR, "saved_results")
@@ -488,12 +644,16 @@ def evaluate_model(fix_unsafe: bool = True):
         "model": model_path,
         "agent_mode": mode,
         "episodes": NUM_EPISODES,
-        "env_config": ENV_CONFIG,
+        "seed": resolved_seed,
+        "seed_was_fixed": SEED is not None,
+        "env_config_source": config_source,
+        "env_config_verified": config_verified,
         "wins": wins,
         "direct_docks": direct_docks,
         "drift_successes": drift_wins,
         "win_rate": wins / NUM_EPISODES,
         "failure_counts": failure_counts,
+        "failure_breakdown": "N/A" if not any(failure_counts.values()) else failure_counts,
         "timesteps": {
             "mean": float(np.mean(timesteps)),
             "std": float(np.std(timesteps)),
@@ -501,19 +661,34 @@ def evaluate_model(fix_unsafe: bool = True):
             "max": int(np.max(timesteps)),
             "per_episode": [int(t) for t in timesteps],
         },
-        # Raw action magnitude sum. Divide by SPACECRAFT_MASS_KG for delta-V in m/s.
-        "fuel_action_magnitude": {
+        # Raw L2 action-norm sum, not a fuel unit; kept for backward
+        # comparison with older logs that used this quantity.
+        "action_magnitude": {
             "mean": float(np.mean(fuels)),
             "std": float(np.std(fuels)),
             "min": float(np.min(fuels)),
             "max": float(np.max(fuels)),
         },
-        # Approximate delta-V in m/s (fuel / mass, mass = SPACECRAFT_MASS_KG kg).
-        "fuel_delta_v_approx": {
-            "mean": float(np.mean(fuels) / SPACECRAFT_MASS_KG),
-            "std": float(np.std(fuels) / SPACECRAFT_MASS_KG),
-            "min": float(np.min(fuels) / SPACECRAFT_MASS_KG),
-            "max": float(np.max(fuels) / SPACECRAFT_MASS_KG),
+        # Delta-v, vector norm: what a single gimbaled thruster would have
+        # spent. Secondary metric. Key name kept as "fuel_delta_v_l2_norm"
+        # for JSON schema compatibility.
+        "fuel_delta_v_l2_norm": {
+            "mean": float(np.mean(true_fuels)),
+            "median": float(np.median(true_fuels)),
+            "iqm": interquartile_mean(true_fuels),
+            "std": float(np.std(true_fuels)),
+            "min": float(np.min(true_fuels)),
+            "max": float(np.max(true_fuels)),
+        },
+        # Delta-v, per-axis sum: proportional to the propellant the
+        # three fixed thrusters use. The primary fuel metric.
+        "fuel_delta_v_l1_norm": {
+            "mean": float(np.mean(true_fuels_l1)),
+            "median": float(np.median(true_fuels_l1)),
+            "iqm": interquartile_mean(true_fuels_l1),
+            "std": float(np.std(true_fuels_l1)),
+            "min": float(np.min(true_fuels_l1)),
+            "max": float(np.max(true_fuels_l1)),
         },
         "start_dist": {
             "mean": float(np.mean(start_dists)),
@@ -527,8 +702,32 @@ def evaluate_model(fix_unsafe: bool = True):
 
     with open(results_path, "w") as f:
         json.dump(results, f, indent=4)
+        f.write("\n")
 
-    print(f"\nSaved evaluation results:\n{results_path}")
+    print()
+    print(f"Saved evaluation results:\n{results_path}\n")
+
+    if EXPORT_RESULTS_CSV:
+        # One row per episode, long format for Seaborn. Uses
+        # write_tidy_csv() since this script's per-episode data
+        # doesn't share the paired result dict shape the other scripts use.
+        rows = [
+            {
+                "condition": mode,
+                "checkpoint": os.path.basename(model_path),
+                "episode_idx": i,
+                "outcome": episode_outcomes[i],
+                "win": episode_outcomes[i] in ("direct_dock", "drift_success"),
+                "fuel_l2": true_fuels[i],
+                "fuel_l1": true_fuels_l1[i],
+                "episode_length": timesteps[i],
+                "start_dist": start_dists[i],
+                "end_dist": end_dists[i],
+            }
+            for i in range(NUM_EPISODES)
+        ]
+        csv_path = os.path.join(SCRIPT_DIR, "saved_data", f"checkpoint_test_episodes_{timestamp}.csv")
+        write_tidy_csv(rows, csv_path, data_label="episode results")
 
 
 if __name__ == "__main__":

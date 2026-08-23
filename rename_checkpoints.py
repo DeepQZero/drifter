@@ -1,30 +1,25 @@
-"""
-rename_checkpoints.py
+"""Rename checkpoints to the project's standard naming format.
 
-Migration script that renames every checkpoint under data/checkpoints to
-this project's canonical format: {prefix}_model_{run}_{stage}_{epoch}.zip
+Standard format:
+    {prefix}_model_{run}_{stage}_{epoch}.zip
 
-Older formats it handles (see evaluation_utilities.py for the full history):
-    - {prefix}_model_{stage}_{run}_{epoch}.zip  (stage/run swapped)
-    - {prefix}_model_{stage}_{run}.zip          (earliest, no epoch yet)
+Handled older formats:
+- {prefix}_model_{stage}_{run}_{epoch}.zip
+- {prefix}_model_{stage}_{run}.zip
+- nodrift_ppo_model_*.zip
+  - Legacy nodrift files are renamed to either:
+    nodrift_curriculum_ppo_model or nodrift_standalone_ppo_model
+    based on the run folder name.
 
-Reads each file's (run, stage, epoch) via evaluation_utilities.
-_parse_checkpoint rather than re-guessing the format itself. That
-function clarifies the current vs. swapped 3-number formats by
-cross-checking the run number against the checkpoint's own parent
-folder name (example: "safe_PPO_15" -> run 15).
-
-This makes the script safe to run on a mix of migrated and not-yet-migrated 
-folders: a file already in canonical format parses back to the same 
-(run, stage, epoch), so its target filename matches its current one and it 
-is left alone.
+Safe to run repeatedly:
+- Already-correct files are left alone.
+- Mixed old/new folders can be processed in one run.
 
 Usage:
-    python rename_checkpoints.py          # Dry run, only prints what would happen
-    python rename_checkpoints.py --apply  # Actually renames the files
+    python rename_checkpoints.py          # Dry run only
+    python rename_checkpoints.py --apply  # Rename files
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -33,12 +28,52 @@ from evaluation_utilities import _parse_checkpoint
 BASE_DIR = Path(__file__).resolve().parent
 CHECKPOINT_ROOT = BASE_DIR / "data" / "checkpoints"
 
-# Prefixes this script knows how to rename. Add to this list if a new
-# checkpoint family is introduced later.
-KNOWN_PREFIXES = ["safe_ppo_model", "nodrift_ppo_model"]
+# Prefixes this script recognizes. None is a prefix of another, so
+# matching order is irrelevant.
+KNOWN_PREFIXES = [
+    "safe_ppo_model",
+    "nodrift_curriculum_ppo_model",
+    "nodrift_standalone_ppo_model",
+    "nodrift_ppo_model",  # legacy: shared by both nodrift trainers, see resolve_target_prefix
+]
+
+# Legacy prefix shared by both nodrift trainers before they had distinct
+# CHECKPOINT_PREFIX values. Its target prefix must be resolved from the
+# run folder name; see resolve_target_prefix.
+LEGACY_NODRIFT_PREFIX = "nodrift_ppo_model"
+
+
+def resolve_target_prefix(matched_prefix: str, run_folder_name: str) -> str:
+    """Resolve the standard target prefix for a matched checkpoint file.
+
+    Every prefix maps to itself except LEGACY_NODRIFT_PREFIX, which both
+    nodrift trainers share and so is resolved from the run folder name:
+    "curriculum" in the name means nodrift_curriculum_ppo_model, else
+    nodrift_standalone_ppo_model.
+
+    Args:
+        matched_prefix: One of KNOWN_PREFIXES, already matched against
+            the filename.
+        run_folder_name: Basename of the checkpoint's parent folder, used
+            only to disambiguate LEGACY_NODRIFT_PREFIX.
+
+    Returns:
+        The standard prefix this checkpoint's filename should use.
+    """
+    if matched_prefix != LEGACY_NODRIFT_PREFIX:
+        return matched_prefix
+    return (
+        "nodrift_curriculum_ppo_model"
+        if "curriculum" in run_folder_name
+        else "nodrift_standalone_ppo_model"
+    )
 
 
 def main():
+    """Rename checkpoint files to the current naming scheme.
+
+    Safe to run more than once: running it again on already-renamed files does nothing.
+    """
     apply_changes = "--apply" in sys.argv
 
     if not CHECKPOINT_ROOT.exists():
@@ -57,31 +92,32 @@ def main():
         for checkpoint_file in sorted(run_folder.glob("*.zip")):
             filename = checkpoint_file.stem  # filename without .zip
 
-            prefix = next(
+            matched_prefix = next(
                 (p for p in KNOWN_PREFIXES if filename.startswith(p + "_")), None
             )
-            if prefix is None:
-                # Does not match a known checkpoint naming pattern.
-                # Likely something like final_model.zip; leave it alone.
+            if matched_prefix is None:
+                # Unknown naming pattern (e.g. final_model_nodrift_standalone_13.zip,
+                # final_model_nodrift_curriculum_60.zip, final_stage_model_safe_51.zip);
+                # leave it alone.
                 print(f"  Skipping (no match): {checkpoint_file.name}")
                 total_skipped += 1
                 continue
 
             run, stage, epoch = _parse_checkpoint(str(checkpoint_file))
             if -1 in (run, stage, epoch):
-                # Prefix matched but the trailing numbers didn't parse
-                # into a complete (run, stage, epoch). Leave it alone
-                # rather than guessing.
+                # Prefix matched but the trailing numbers didn't parse into a
+                # complete (run, stage, epoch). Leave it alone rather than guessing.
                 print(f"  Skipping (could not parse): {checkpoint_file.name}")
                 total_skipped += 1
                 continue
 
-            new_filename = f"{prefix}_{run}_{stage}_{epoch}.zip"
+            target_prefix = resolve_target_prefix(matched_prefix, run_folder.name)
+            new_filename = f"{target_prefix}_{run}_{stage}_{epoch}.zip"
             new_path = checkpoint_file.parent / new_filename
 
             if new_path == checkpoint_file:
-                # Already in the canonical format. This is what makes
-                # the script idempotent: nothing to rename here.
+                # Already in canonical format (correct prefix and order).
+                # Nothing to rename; this is why re-running the script is safe.
                 total_unchanged += 1
                 continue
 
@@ -103,7 +139,7 @@ def main():
 
     if not apply_changes:
         print("\nThis was a dry run. No files were changed.")
-        print("Run with --apply to actually rename the files.")
+        print("Run with --apply to rename the files.")
 
 
 if __name__ == "__main__":
