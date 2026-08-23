@@ -5,6 +5,9 @@ __pycache__/
 *.pyd
 *.pyc
 
+# Superseded / archived dev code
+old/
+
 # Virtual environments
 venv/
 .env/
@@ -17,6 +20,10 @@ data/
 # Evaluation outputs
 saved_figures/
 saved_results/
+saved_data/
+
+# Fixed evaluation start-state sets
+# test_sets/
 
 # Logs
 *.log
@@ -42,7 +49,10 @@ dist/
 # Matplotlib cache
 .matplotlib/
 
-# Model formats (future deployment artifacts)
+# Model formats
 *.pt
 *.pth
 *.onnx
+
+# Reference papers and documents
+*.pdf
