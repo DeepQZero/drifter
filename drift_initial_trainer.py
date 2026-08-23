@@ -3,58 +3,91 @@ drift_initial_trainer.py
 
 Curriculum training script for the drift-assisted docking agent (Drifter-Learn).
 
-Trains a PPO agent through a series of progressively harder stages. Each stage
-trains in a loop until the dock rate hits the stage threshold, then advances to
-the next stage using the last saved checkpoint as a starting point.
+Trains a PPO agent through progressively harder stages. Each stage trains
+in a loop until the dock rate hits its threshold, then advances using the
+last saved checkpoint as a starting point.
 
-Curriculum stages go from very close, slow starts (stage 0) up to full
-range (stage 9). Stages 4 and above introduce drift mechanics, where the agent
-learns to coast to the dock instead of thrusting the whole way.
+- Stages go from very close, slow starts (stage 0) up to full range
+  (stage 9). Stages 4 and up introduce drift, where the agent coasts to
+  the dock instead of thrusting the whole way.
+- test_model() runs after every save during training, and can also be
+  called standalone from __main__ to evaluate one checkpoint.
+- Checkpoint format: safe_ppo_model_{run}_{stage}_{epoch}.zip
+  (example: safe_ppo_model_1_6_0.zip -> run 1, stage 6, epoch 0).
 
-test_model() is also called during training to measure dock rate after each
-save. It can also be called standalone from __main__ to evaluate a specific
-checkpoint without running a full training session.
-
-Checkpoint naming format: safe_ppo_model_{run}_{stage}_{epoch}.zip
-Example: safe_ppo_model_1_6_0.zip -> run 1, stage 6, epoch 0
+Set SEED to a fixed integer for reproducibility. This seeds both the
+environment (Env.reset(seed=...), sets self.np_random) and PPO's own RNG
+(network init, action sampling). Reproducibility depends on Gymnasium's
+seeded behavior, which has changed across versions before; we use
+gymnasium==1.2.3, so re-verify seeded runs after any upgrade.
 """
 
+import drift_env
 from drift_env import DriftTrainEnv
 import typing as tt
 import numpy as np
 from stable_baselines3 import PPO
 import os
 import time
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 # User config: change these values to adjust how training runs.
-# Set START_STAGE = 0 and RESUME_FROM = None to train from scratch.
-# Set START_STAGE to a higher number and RESUME_FROM to a checkpoint path
-# to resume training from a specific stage without redoing earlier ones.
-START_STAGE = 0
-RESUME_FROM = None  # example: r"data\checkpoints\safe_PPO_6\safe_ppo_model_6_7_1.zip"
 
-# True: keep all checkpoints so training curves and graphs can be reconstructed later.
+# RUN_NAME controls the checkpoint folder name under data/checkpoints.
+RUN_NAME = "safe_PPO"
+
+# CHECKPOINT_PREFIX controls the saved model filename prefix.
+CHECKPOINT_PREFIX = "safe_ppo_model"
+
+# Number of curriculum stages. Includes stage 10, a test-only config
+# used for evaluation, not a trained stage. Unique to the drift agent.
+NUM_STAGES = 10
+
+# Set to 0 to train from scratch, or a higher number to resume from a
+# specific stage. RESUME_FROM is ignored when START_STAGE is 0.
+START_STAGE = 0
+RESUME_FROM = None  # example: rf"data\checkpoints\{RUN_NAME}_6\{CHECKPOINT_PREFIX}_6_7_1.zip"
+
+# Optional seed for reproducibility.
+# True (an int): fixes randomness across training and evaluation.
+# False (None): uses a random seed each run.
+SEED = None
+
+# Number of parallel environments for training. Higher uses more CPU
+# cores. Each environment step is cheap, so this mainly speeds up
+# rollout collection between policy updates.
+N_ENVS = 6
+
+# Rollout size collected per training epoch, in timesteps.
+TIMESTEPS_PER_EPOCH = 25_000
+
+# Number of episodes test_model() runs per evaluation.
+TEST_EPISODES = 1_000
+
+# True: keep every checkpoint from every epoch, so training curves and
+# graphs can be reconstructed later.
 # False: keep only the final passing checkpoint per stage.
 SAVE_ALL_EPOCHS = True
 
-# Maximum number of training epochs per stage before moving on, even if the
-# score threshold has not been reached. Prevents a single stage from running
-# indefinitely if the model stops improving.
+# Maximum number of training epochs per stage before moving on, even if
+# the score threshold has not been reached. Prevents a single stage from
+# running indefinitely if the model stalls.
 MAX_EPOCHS_PER_STAGE = 10
 
 # Set a specific run number to use for this training run, for example 13.
-# Useful for running two versions side by side for a paper (e.g. 13 vs 14)
-# or for naming a run something memorable for an ablation.
-# Set to None to auto-increment from the highest existing safe_PPO_<N> folder.
+# Useful for running two versions side by side for a paper, or naming a
+# run something memorable for an ablation.
+# Set to None to auto-increment from the highest existing RUN_NAME folder.
 MANUAL_RUN_ID = None  # example: 13
 
 # True: refuse to run when MANUAL_RUN_ID already exists on disk.
-# False: allow overwriting the existing MANUAL_RUN_ID folder.
+# False: allow overwriting an existing MANUAL_RUN_ID folder.
 # Only applies when MANUAL_RUN_ID is set.
 PREVENT_OVERWRITE = True
 
 
-def curriculum_learn(model_id: int, run_dir: str):
+def curriculum_learn(model_id: int, run_dir: str, seed: int = SEED):
     """Train a drift-assisted docking agent through a series of curriculum stages.
 
     Each stage trains in a loop until the dock rate hits the stage threshold
@@ -64,6 +97,7 @@ def curriculum_learn(model_id: int, run_dir: str):
     Args:
         model_id: Number used in checkpoint filenames to identify this run.
         run_dir: Folder where checkpoints are saved.
+        seed: Optional seed for reproducibility.
     """
     # If resuming mid-curriculum, use the provided checkpoint as the starting
     # point. After the first stage completes, last_save_path takes over and
@@ -72,72 +106,77 @@ def curriculum_learn(model_id: int, run_dir: str):
     total_timesteps = 0
     run_start = time.time()
 
-    for curr in range(START_STAGE, 10):
-        print(f'\nStarting stage {curr}')
+    for curr in range(START_STAGE, NUM_STAGES):
+        print(f'Starting stage {curr}')
         stage_start = time.time()
         stage_timesteps = 0
 
         configs, threshold = get_curriculum(curr)
-        env = DriftTrainEnv(**configs)
+        env = make_vec_env(lambda: DriftTrainEnv(**configs), n_envs=N_ENVS, vec_env_cls=SubprocVecEnv)
 
-        if curr == 0:
-            # Build a new model from scratch for the first stage.
-            model = PPO('MlpPolicy', env,
-                        learning_rate=0.0003,
-                        ent_coef=0.01,
-                        gamma=1.00,
-                        n_steps=512,
-                        batch_size=64,
-                        verbose=1)
-        else:
-            # Load the last checkpoint from the previous stage and
-            # keep training in the new, harder environment.
-            model = PPO.load(last_save_path, env=env)
+        try:
+            if curr == 0:
+                # Build a new model from scratch for the first stage.
+                model = PPO('MlpPolicy', env,
+                            learning_rate=0.0003,
+                            ent_coef=0.01,
+                            gamma=1.00,
+                            n_steps=512,
+                            batch_size=64,
+                            verbose=1,
+                            seed=seed)
+            else:
+                # Load the last checkpoint from the previous stage and
+                # keep training in the new, harder environment.
+                model = PPO.load(last_save_path, env=env)
 
-        score = 0
-        epoch = -1
-        prev_save_path = None  # tracks the previous epoch's checkpoint for cleanup
+            score = 0
+            epoch = -1
+            prev_save_path = None  # Tracks the previous epoch's checkpoint for cleanup
 
-        while score < threshold and epoch < MAX_EPOCHS_PER_STAGE - 1:
-            epoch += 1
-            # TODO: what happens if model diverges?
-            model.learn(total_timesteps=25_000)
-            stage_timesteps += 25_000
-            total_timesteps += 25_000
+            while score < threshold and epoch < MAX_EPOCHS_PER_STAGE - 1:
+                epoch += 1
+                # TODO: what happens if model diverges?
+                model.learn(total_timesteps=TIMESTEPS_PER_EPOCH)
+                stage_timesteps += TIMESTEPS_PER_EPOCH
+                total_timesteps += TIMESTEPS_PER_EPOCH
 
-            save_path = os.path.join(
-                run_dir,
-                f"safe_ppo_model_{model_id}_{curr}_{epoch}"
-            )
-            model.save(save_path)
-            last_save_path = save_path
-            score = test_model(save_path, curr)
+                save_path = os.path.join(
+                    run_dir,
+                    f"{CHECKPOINT_PREFIX}_{model_id}_{curr}_{epoch}"
+                )
+                model.save(save_path)
+                last_save_path = save_path
+                score = test_model(save_path, curr, seed=seed)
 
-            save_name = os.path.basename(save_path)
-            print(f"  Epoch {epoch}: dock rate {score:.5f} ({100*score:.1f}%)  |  {save_name}")
+                save_name = os.path.basename(save_path)
+                print(f"  Epoch {epoch}: dock rate {score:.3f} ({100*score:.1f}%)  |  {save_name}")
 
-            # If SAVE_ALL_EPOCHS is off, delete the previous epoch's checkpoint
-            # now that we have a newer one. The final passing checkpoint is
-            # always kept because deletion happens before the next save.
-            if not SAVE_ALL_EPOCHS and prev_save_path is not None:
-                zip_path = prev_save_path + ".zip"
-                if os.path.exists(zip_path):
-                    os.remove(zip_path)
+                # If SAVE_ALL_EPOCHS is off, delete the previous epoch's checkpoint
+                # now that we have a newer one. The final passing checkpoint is
+                # always kept because deletion happens before the next save.
+                if not SAVE_ALL_EPOCHS and prev_save_path is not None:
+                    zip_path = prev_save_path + ".zip"
+                    if os.path.exists(zip_path):
+                        os.remove(zip_path)
 
-            prev_save_path = save_path
+                prev_save_path = save_path
 
-        if score < threshold:
-            is_last_stage = (curr == 9)
-            status = "Training complete for final stage" if is_last_stage else "Moving on to next stage"
-            print(f"  Stage {curr} hit epoch limit ({MAX_EPOCHS_PER_STAGE}) "
-                  f"with dock rate {score:.5f} ({100*score:.1f}%). {status}.")
-        
-        stage_elapsed = time.time() - stage_start
-        stage_min = int(stage_elapsed // 60)
-        stage_sec = int(stage_elapsed % 60)
-        stage_hrs = stage_elapsed / 3600
-        print(f"Stage {curr} complete: {stage_timesteps:,} timesteps, "
-              f"{stage_min} min {stage_sec} sec ({stage_hrs:.2f} hrs)")
+            if score < threshold:
+                is_last_stage = (curr == NUM_STAGES - 1)
+                status = "Training complete for final stage" if is_last_stage else "Moving on to next stage"
+                print(f"  Stage {curr} hit epoch limit ({MAX_EPOCHS_PER_STAGE}) "
+                    f"with dock rate {score:.3f} ({100*score:.1f}%). {status}.")
+
+            stage_elapsed = time.time() - stage_start
+            stage_min = int(stage_elapsed // 60)
+            stage_sec = int(stage_elapsed % 60)
+            stage_hrs = stage_elapsed / 3600
+            print(f"Stage {curr} complete: {stage_timesteps:,} timesteps, "
+                f"{stage_min} min {stage_sec} sec ({stage_hrs:.2f} hrs)")
+        finally:
+            # Always close subprocess environments, even if training or testing fails.
+            env.close()
 
     total_elapsed = time.time() - run_start
     total_min = int(total_elapsed // 60)
@@ -153,7 +192,7 @@ def curriculum_learn(model_id: int, run_dir: str):
     print(f"  Avg per stage:   {avg_min} min {avg_sec} sec")
 
 
-def test_model(path: str, curriculum: int) -> float:
+def test_model(path: str, curriculum: int, seed: int = SEED) -> float:
     """Evaluate a checkpoint over 1000 episodes and return the dock rate.
 
     Called automatically during training after each save. Can also be run
@@ -165,18 +204,24 @@ def test_model(path: str, curriculum: int) -> float:
     Args:
         path: Path to the saved model checkpoint.
         curriculum: Stage number, used to set up the right environment.
+        seed: Optional seed for reproducibility.
 
     Returns:
         Fraction of episodes that ended in a successful dock or drift.
     """
+    # test_model runs one episode at a time with a specific seed offset per
+    # episode, so it stays a single environment.
     configs, _ = get_curriculum(curriculum)
     env = DriftTrainEnv(**configs)
     model = PPO.load(path, env=env)
     all_rews, all_fuels, all_docks = [], [], []
 
-    for i in range(1_000):
+    for i in range(TEST_EPISODES):
         done = False
-        obs, info = env.reset()
+        # Offset by episode index so episodes stay varied while the whole
+        # test set is reproducible when seed is fixed.
+        episode_seed = None if seed is None else seed + i
+        obs, info = env.reset(seed=episode_seed)
         epi_fuel, epi_reward = 0, 0
         is_drift = False
         while not done:
@@ -198,10 +243,10 @@ def test_model(path: str, curriculum: int) -> float:
                 all_fuels.append(epi_fuel)
 
     print(f"  Model stats for stage {curriculum}:")
-    print(f"    Dock rate:    {np.mean(all_docks):.5f} ({100*np.mean(all_docks):.1f}%)")
+    print(f"    Dock rate:    {np.mean(all_docks):.3f} ({100*np.mean(all_docks):.1f}%)")
     print(f"    Mean reward:  {np.mean(all_rews):.5f}")
-    print(f"    Fuel (delta-V):  mean {np.mean(all_fuels):.5f} m/s  "
-          f"median {np.median(all_fuels):.5f} m/s")
+    print(f"    Fuel (delta-V):  mean {np.mean(all_fuels):.3f} m/s  "
+          f"median {np.median(all_fuels):.3f} m/s")
     return float(np.mean(all_docks))
 
 
@@ -390,11 +435,11 @@ if __name__ == "__main__":
         # Useful for running paired experiments with predictable IDs, e.g.
         # safe_PPO_13 as a baseline and safe_PPO_14 as an ablation.
         run_num = MANUAL_RUN_ID
-        run_dir = os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
+        run_dir = os.path.join(checkpoints_dir, f"{RUN_NAME}_{run_num}")
 
         if PREVENT_OVERWRITE and os.path.exists(run_dir):
             raise FileExistsError(
-                f"safe_PPO_{run_num} already exists at {run_dir}. "
+                f"{RUN_NAME}_{run_num} already exists at {run_dir}. "
                 f"Set PREVENT_OVERWRITE = False to overwrite it, or choose "
                 f"a different MANUAL_RUN_ID."
             )
@@ -402,16 +447,29 @@ if __name__ == "__main__":
         # Find the next available run number so old checkpoints are not overwritten.
         run_num = 1
         while os.path.exists(
-            os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
+            os.path.join(checkpoints_dir, f"{RUN_NAME}_{run_num}")
         ):
             run_num += 1
-        run_dir = os.path.join(checkpoints_dir, f"safe_PPO_{run_num}")
+        run_dir = os.path.join(checkpoints_dir, f"{RUN_NAME}_{run_num}")
 
     os.makedirs(run_dir, exist_ok=True)
     model_id = run_num
 
     print(f"\nSaving models to: {run_dir}")
-    print(f"Model ID: {model_id}\n")
+    print(f"Model ID: {model_id}")
+    if SEED is not None:
+        print(f"Seed: {SEED}")
+    else:
+        print("Seed: not set")
+
+    # Record which SafeRL comparison options (drift_env.py) were active. All
+    # default to off = current drifter behavior. Note the drift env already
+    # enforces the velocity constraint unconditionally via is_unsafe, so it
+    # has no separate velocity-constraint flag.
+    print("SafeRL options:")
+    print(f"  obs (speed + max_vel_limit):   {drift_env.SAFERL_OBS}")
+    print(f"  exponential distance reward:   {drift_env.SAFERL_EXP_DIST_REWARD}")
+    print(f"  delta-V fuel penalty:          {drift_env.SAFERL_DELTA_V_PENALTY}\n")
     curriculum_learn(model_id, run_dir)
 
     # To test a specific checkpoint after training:

@@ -1,42 +1,31 @@
 """
 checkpoint_test.py
 
-Evaluates a single trained model checkpoint over several episodes and
-reports how well it docks: win rate, failure reasons, a 3D trajectory
-plot, and a JSON results file.
+Evaluates a single trained checkpoint over several episodes: win rate,
+failure reasons, a 3D trajectory plot, and a JSON results file. Supports
+both drift-assisted and direct-docking (nodrift) checkpoints; set
+AGENT_MODE below to match the model being evaluated.
 
 Checkpoint finding, the early-termination patch, and failure
 classification are shared with curriculum_evaluation.py through
 evaluation_utilities.py.
 
-Supports both drift-assisted and direct-docking (nodrift) checkpoints.
-Set AGENT_MODE below to match the model being evaluated.
+Limitations:
+  - Evaluates ONE stage in isolation, using that stage's own training
+    config. Many drift stages train with a short max_episode_len (5-10
+    steps) and a wide pos_thresh, so the lookahead can find a drift
+    opportunity almost immediately. That is expected, not a bug.
+  - For a full mission-level run, use drift_full_test.py instead. It
+    chains all five stage models from 100-150m down to the final 0.5m dock.
+  - Best used as a diagnostic tool to confirm one checkpoint behaves
+    correctly in its own training environment. Also useful for nodrift
+    agents, whose longer episodes make for more interesting trajectories
+    even at a single stage.
 
-IMPORTANT - Understanding this script's limitations:
-  This script evaluates ONE stage in isolation using that stage's own
-  training environment config. For drift agents, many stages were trained
-  with a very short max_episode_len (5-10 steps) and a wide docking
-  threshold (pos_thresh), so the lookahead detects a drift opportunity
-  almost immediately without meaningful travel. This is expected behavior
-  for a single stage; it is not a bug or a sign the agent is underperforming.
-
-  For a complete, mission-level evaluation of the drift agent, use
-  drift_full_test.py instead, which chains all five stage models together
-  into a single continuous episode from 100-150m starting range down to
-  the final 0.5m dock.
-
-  checkpoint_test.py is best used as a diagnostic tool to confirm that a
-  specific stage checkpoint behaves correctly in its own training environment.
-  It is also useful for nodrift agents, which have long episodes and produce
-  visually interesting trajectories even at a single stage.
-
-FUEL NOTE:
-  Fuel reported here is raw action magnitude accumulated as
-  sum(linalg.norm(action)) across all steps. This is NOT delta-V.
-  To convert to delta-V (m/s), divide by mass (12 kg) and multiply by
-  step length (1 s): delta_V = fuel_here / 12.
-  drift_full_test.py reports true delta-V directly and should be used
-  for fuel comparisons between drift and nodrift agents.
+Fuel note: reported fuel is raw sum(linalg.norm(action)) across all
+steps, not delta-V. Convert with delta_V = fuel_here / mass (12 kg).
+drift_full_test.py reports true delta-V directly; use it for fuel
+comparisons between drift and nodrift agents.
 """
 
 import os
@@ -52,6 +41,7 @@ from stable_baselines3 import PPO
 
 from evaluation_utilities import (
     resolve_checkpoint_paths,
+    resolve_agent_mode,
     patch_unsafe_termination,
     classify_failure,
 )
@@ -65,48 +55,55 @@ AGENT_MODE = "auto"
 # CHECKPOINT CONFIG
 # "latest"                            -> newest .zip in the most recent run folder
 # "run:nodrift_curriculum_PPO_13"     -> newest .zip inside that exact run folder
-# "data/checkpoints/safe_PPO_14"      -> newest .zip in this folder
+# "data/checkpoints/safe_PPO_16"      -> newest .zip in this folder
 # "pattern:safe_ppo_model_*_6_*.zip"  -> custom glob inside the checkpoint root, matches stage 6
 # r"C:\...\checkpoint.zip"            -> exact path to one checkpoint file
-#
-# The default below points at the current nodrift curriculum run in this
+
+# The default below points at the current drift curriculum run in this
 # workspace. Change the run folder name, use "latest", or provide an exact
 # path to evaluate a different checkpoint.
-CHECKPOINT = "run:nodrift_curriculum_PPO_13"
+CHECKPOINT = "run:safe_PPO_16"  # default: most recent drift curriculum run
 
-NUM_EPISODES = 25
+NUM_EPISODES = 10
 
 # ENV_CONFIG sets the evaluation environment parameters.
 # These should match the curriculum stage the model was trained on.
 # See drift_initial_trainer.py or nodrift_initial_trainer.py get_curriculum()
 # for the exact values used at each stage.
 
-# Drift stage 6 example (safe_ppo_model_{run}_6_{epoch}):
-#   pos_thresh = 10, speed_thresh = 0.22
-#   min/max_init_pos_bound = 10 / 50
-#   max_init_vel_bound = 0.3, max_boundary_box = 60
-#   max_episode_len = 6, max_lookahead_len = 50, drift_step_len = 10
+# Nodrift long curriculum stages:
+#   stage 0:  pos_thresh = 50,  speed_thresh = 0.30, threshold = 0.90
+#   stage 1:  pos_thresh = 25,  speed_thresh = 0.30, threshold = 0.90
+#   stage 2:  pos_thresh = 10,  speed_thresh = 0.25, threshold = 0.90
+#   stage 3:  pos_thresh = 5,   speed_thresh = 0.22, threshold = 0.85
+#   stage 4:  pos_thresh = 2.5, speed_thresh = 0.20, threshold = 0.85
+#   stage 5:  pos_thresh = 1,   speed_thresh = 0.20, threshold = 0.85
+#   stage 6:  pos_thresh = 0.5, speed_thresh = 0.20, threshold = 0.95
 
-# Drift stage 8 example (safe_ppo_model_{run}_8_{epoch}):
-#   pos_thresh = 100, speed_thresh = 0.4
+# Curriculum values used by this evaluator:
+#   curriculum < 7  -> uses the matching nodrift stage from get_curriculum()
+#   curriculum >= 7 -> clamps to the final nodrift stage (stage 6)
+
+# Final nodrift evaluation config:
+#   pos_thresh = 0.5, speed_thresh = 0.2
 #   min/max_init_pos_bound = 100 / 150
-#   max_init_vel_bound = 0.5, max_boundary_box = 200
-#   max_episode_len = 10, max_lookahead_len = 50, drift_step_len = 10
+#   max_init_vel_bound = 0.4, max_boundary_box = 200
+#   max_episode_len = 2000, max_control = 1.0, step_len = 1
+#   max_total_dv = 2500
+#   fixed_start = False, fixed_state = [100, 0, 0, 0, 0, 0, 0]
 
-# Nodrift stage 4 example (nodrift_ppo_model_{run}_4_{epoch}):
-#   pos_thresh = 10, speed_thresh = 0.22
-#   min/max_init_pos_bound = 20 / 75
-#   max_init_vel_bound = 0.4, max_boundary_box = 120
-#   max_episode_len = 500 (no drift keys)
+# Modified drifter curriculum stages:
 ENV_CONFIG = {
-    "min_init_pos_bound": 2.5,
-    "max_init_pos_bound": 20,
-    "max_init_vel_bound": 0.3,
-    "max_boundary_box": 50,
-    "max_episode_len": 250,
-    "pos_thresh": 2.5,
-    "speed_thresh": 0.2,
-    "max_total_dv": 2500,
+    "min_init_pos_bound": 100,
+    "max_init_pos_bound": 150,
+    "max_init_vel_bound": 0.5,
+    "max_boundary_box": 200,
+    "max_episode_len": 10,
+    "max_lookahead_len": 50,
+    "drift_step_len": 10,
+    "pos_thresh": 50,
+    "speed_thresh": 0.4,
+    "max_total_dv": 1000.0,
 }
 
 # Used only for the approximate delta-V conversion in this diagnostic script.
@@ -117,24 +114,6 @@ SPACECRAFT_MASS_KG = 12
 # launched from.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CHECKPOINT_ROOT = os.path.join(SCRIPT_DIR, "data", "checkpoints")
-
-
-def detect_agent_mode(model_path: str) -> str:
-    """Detect whether a checkpoint is a drift or nodrift model.
-
-    Checks the checkpoint filename and parent folder name for the word
-    "nodrift". Falls back to "drift" if no match is found.
-
-    Args:
-        model_path: Full path to the checkpoint file.
-
-    Returns:
-        "nodrift" if the path contains "nodrift", otherwise "drift".
-    """
-    path_lower = model_path.lower()
-    if "nodrift" in path_lower:
-        return "nodrift"
-    return "drift"
 
 
 def make_env(mode: str):
@@ -202,6 +181,8 @@ def classify_failure_nodrift(env) -> str:
     """
     if env.is_crashed():
         return "crash"
+    if env.vel_budget_exhausted():
+        return "unsafe"
     if env.is_out_of_bounds():
         return "out_of_bounds"
     if env.is_out_of_fuel():
@@ -355,9 +336,7 @@ def evaluate_model(fix_unsafe: bool = True):
     print(f"Loading model:\n{model_path}\n")
 
     # Resolve the agent mode from the config or the checkpoint filename.
-    mode = AGENT_MODE
-    if mode == "auto":
-        mode = detect_agent_mode(model_path)
+    mode = resolve_agent_mode(AGENT_MODE, model_path)
     print(f"Agent mode: {mode}\n")
 
     model = PPO.load(model_path, device="cpu")
@@ -372,11 +351,16 @@ def evaluate_model(fix_unsafe: bool = True):
         # rule so checkpoints are judged on docking performance instead.
         patch_unsafe_termination(env)
 
+    # Read positions from the env state (always meters) rather than the
+    # observation, which may be normalized (docking_env.py NORMALIZE_OBS).
+    inner_env = env.env if mode == "drift" else env
+
     wins = 0
     direct_docks = 0
     drift_wins = 0
     failure_counts = {
-        "crash": 0, "out_of_bounds": 0, "fuel": 0, "timeout": 0, "unknown": 0
+        "crash": 0, "unsafe": 0, "out_of_bounds": 0, "fuel": 0,
+        "timeout": 0, "unknown": 0
     }
 
     fuels = []
@@ -399,24 +383,25 @@ def evaluate_model(fix_unsafe: bool = True):
         done = False
         episode_steps = 0
         episode_action_magnitude = 0
-        trajectory = [obs[:3].copy()]
-        start_distance = np.linalg.norm(obs[:3])
+        trajectory = [inner_env.state[0:3].copy()]
+        start_distance = np.linalg.norm(inner_env.state[0:3])
 
         while not done:
             action, _ = model.predict(obs[:expected_obs_size], deterministic=True)
+            # Backwards compatibility: older nodrift models expect 6-element obs, newer ones expect 7 or 9.
 
             # Suppress environment prints (WIN!, UNSAFE!) so only this
             # script's own per-episode result line is shown.
             with contextlib.redirect_stdout(io.StringIO()):
                 obs, reward, terminated, truncated, info = env.step(action)
 
-            trajectory.append(obs[:3].copy())
+            trajectory.append(inner_env.state[0:3].copy())
             # Raw action magnitude, not delta-V. Divide by 12 for delta-V.
             episode_action_magnitude += np.linalg.norm(action)
             episode_steps += 1
             done = terminated or truncated
 
-        end_distance = np.linalg.norm(obs[:3])
+        end_distance = np.linalg.norm(inner_env.state[0:3])
         is_win, outcome = check_win(env, mode)
 
         if is_win:
