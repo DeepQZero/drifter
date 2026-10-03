@@ -1,84 +1,79 @@
-# Drifter
+# Low-Fuel Deep Reinforcement Learning Spacecraft Control through Lookahead Drifting
 
-A Proximal Policy Optimization (PPO)-based reinforcement learning (RL) system for autonomous spacecraft rendezvous and docking using Clohessy-Wiltshire-Hill (CWH) orbital dynamics. The deputy spacecraft learns to approach and dock with a chief spacecraft. We implement two primary training approaches: drift-assisted docking (Drifter-Learn) and direct docking without drift.
+**Drifter** is a reinforcement learning (RL) codebase for low-fuel spacecraft docking. It contains the Drifter-Refine and Drifter-Learn algorithms, a Gymnasium docking environment, Proximal Policy Optimization (PPO) and Linear-Quadratic Regulator (LQR) baselines, and the evaluation code for the submitted paper below:
 
-## Authors
+Marcos Sanson, Nikita Agrawal, Andrea Schefer, Aaron Lee, Loren James Anderson, and Kristina Miller, "Low-Fuel Deep Reinforcement Learning Spacecraft Control through Lookahead Drifting," submitted to the *2027 IEEE Aerospace Conference*. DOI to be added.
 
 **Organization:** Air Force Research Laboratory (AFRL)
 
-**Authors:**
-- Loren James Anderson
-- Marcos Sanson
-- Nikita Agrawal
-- Aaron Lee
-- Andrea Schefer
-
----
-
 ## Table of Contents
 
-- [Repository Structure](#repository-structure)
-- [Getting Started](#getting-started)
+- [Overview](#overview)
+- [Results](#results)
+- [Repository Contents](#repository-contents)
+- [Installation](#installation)
 - [Training](#training)
 - [Evaluation](#evaluation)
-- [Troubleshooting](#troubleshooting)
-- [Ideas](#ideas)
-- [TODO](#todo)
-- [Definitions](#definitions)
+- [Command-Line Options](#command-line-options)
+- [Acknowledgements](#acknowledgements)
 
----
+## Overview
 
-## Repository Structure
+Fuel is a limited resource for spacecraft, and refueling in orbit is costly and carries risk. Fuel-efficient control is therefore an important consideration throughout mission design, including proximity operations such as docking.
 
-```
-drifter/
-├── .gitignore
-├── README.md
-│
-├── drift_env.py                  # Drift-assisted docking environment (DriftTrainEnv, DriftTestEnv)
-├── docking_env.py                # Direct docking environment, no drift mechanic
-│
-├── initial_trainer.py            # Curriculum training for the drift agent
-├── initial_trainer2.py           # Alternate curriculum trainer with additional stats
-├── nodrift_initial_trainer.py    # Curriculum training for the direct docking agent
-│
-├── train.py                      # Single-run PPO training with checkpoint callbacks
-├── nodrift_train.py              # Single-run PPO training, no drift
-│
-├── test.py                       # Quick single-model evaluation script
-├── part_test.py                  # Partial evaluation script
-├── question.py                   # Scratch/experimental script
-│
-├── full_test.py                  # Manual end-to-end curriculum chain evaluation
-├── checkpoint_test.py            # Single checkpoint evaluation with trajectory plots
-├── curriculum_evaluation.py      # Automated curriculum chain evaluation
-├── evaluation_utilities.py       # Shared checkpoint resolution and evaluation helpers
-│
-└── data/
-    └── checkpoints/
-        ├── safe_PPO_1/           # Drift curriculum run 1
-        │   ├── safe_ppo_model_0_1_0.zip
-        │   ├── safe_ppo_model_1_1_0.zip
-        │   ├── ...
-        │   └── safe_ppo_model_9_1_0.zip
-        ├── safe_PPO_8/           # Example: drift curriculum run 8
-        │   ├── safe_ppo_model_1_8_0.zip
-        │   ├── safe_ppo_model_1_8_1.zip   # epoch 1 (if threshold not met at epoch 0)
-        │   └── ...
-        ├── nodrift_curriculum_PPO_1/
-        │   ├── nodrift_ppo_model_0_1_0.zip
-        │   └── ...
-        └── drifter_PPO_1/        # Single-run (non-curriculum) checkpoints
-            ├── drifter_ppo_25000_steps.zip
-            ├── drifter_ppo_50000_steps.zip
-            └── ...
-```
+RL has recently emerged as a promising approach for autonomous spacecraft control. Prior work has applied it to docking, landing, and orbital control, largely in simulation.
 
-Checkpoint files and training data are excluded from version control via `.gitignore`.
+A common way to encourage fuel efficiency is to include a fuel penalty in the reward function. However, this approach can be sensitive to tuning and may reduce training stability.
+Drifter addresses this through drifting, which refers to periods of the maneuver in which the spacecraft applies no thrust.
 
----
+Drifter-Refine and Drifter-Learn use a model of the dynamics to look ahead and determine how long the spacecraft can drift before additional thrust is needed. A model-free variant of Drifter-Learn, which does not require this model, is evaluated as an ablation study.
 
-## Getting Started
+As a result, thrusting is limited to a small number of decision points. In addition, Drifter-Learn does not use a fuel penalty in its reward function. The paper presents two algorithms, along with ablation studies:
+
+- **Drifter-Refine** is applied on top of a previously trained policy. It forces a drift whenever a simulated drift brings the deputy spacecraft closer to the chief spacecraft.
+- **Drifter-Learn** is trained with forced drifting and a variable-length final time step in each episode, so that the Bellman backup covers a single time step per drift.
+- Ablation studies cover model-free inference, action shielding, action noise, and sparse rewards.
+
+The experiments use a Gymnasium implementation of a docking environment based on the [Aerospace SafeRL benchmark](https://github.com/act3-ace/SafeRL) (Ravaioli et al., IEEE Aerospace Conference, 2022). In this environment, a deputy spacecraft docks with a chief spacecraft, and the relative motion follows the Clohessy-Wiltshire-Hill (CWH) equations.
+
+Each episode starts with the deputy 100 to 150 m from the chief. An episode ends when the deputy docks (within 0.5 m of the chief at a relative speed of at most 0.2 m/s), crashes, reaches an unsafe state, leaves the 200 m boundary, or reaches the maximum episode length. The thrust on each axis is limited to 1 N.
+
+## Results
+
+The table below shows the results reported in Table 3 of the paper, which compares the evaluated algorithms on the docking task.
+
+The rows are the PPO baseline, Drifter-Refine, Drifter-Learn, the LQR controller, and four Drifter-Learn ablation studies: model-free testing, safety mechanisms, robustness to noise, and reward shaping.
+
+Fuel is the total change in velocity (ΔV) used per episode in meters per second. Success is the percentage of evaluation episodes that end in docking. Time is the episode duration in seconds.
+
+| Algorithm | Fuel (ΔV) | Success (%) | Time (s) |
+|---|---|---|---|
+| PPO | 19.01 [17.72, 20.10] | 99.50 [99.10, 99.90] | 109.43 [106.33, 113.23] |
+| Drifter-Refine | 11.56 [10.55, 12.49] | 100.00 [100.00, 100.00] | 218.11 [215.44, 220.75] |
+| Drifter-Learn | 2.34 [2.23, 2.49] | 95.90 [93.90, 97.50] | 799.76 [779.65, 820.33] |
+| LQR | 1.39 [1.32, 1.45] | 100.00 [96.30, 100.00] | 1859.20 [1851.60, 1866.50] |
+| Model-Free Testing | 2.82 [2.70, 2.94] | 90.40 [87.30, 92.90] | 661.10 [646.60, 679.90] |
+| Safety Mechanisms | 2.26 [2.21, 2.31] | 96.70 [94.80, 98.30] | 808.77 [788.68, 828.97] |
+| Robustness to Noise | 2.30 [2.26, 2.34] | 97.10 [96.00, 98.10] | 795.36 [775.34, 813.05] |
+| Reward Shaping | 2.27 [2.23, 2.30] | 96.50 [95.20, 97.80] | 778.11 [766.38, 789.57] |
+
+Each entry is the mean over 10 trained seeds on 100 held-out start states, with a 95% percentile-bootstrap confidence interval in brackets. LQR is a single deterministic controller, so its fuel and time intervals are bootstrapped over the 100 test episodes, and its success interval is a Wilson score interval.
+
+## Repository Contents
+
+| Purpose | Files |
+|---|---|
+| Docking environment for drifting | `drift_env.py` |
+| Docking environment for direct docking (no drift) | `docking_env.py` |
+| Drifter-Learn curriculum training | `drift_initial_trainer.py` |
+| Evaluating a full curriculum chain of trained models | `drift_full_test.py`, `curriculum_evaluation.py` |
+| Evaluating one checkpoint | `checkpoint_test.py` |
+| Comparing two agents on paired episodes | `drift_vs_drift_test.py`, `drift_vs_nodrift_test.py` |
+| Test-time ablations (safe action and action noise) | options in `drift_full_test.py` |
+| Shared evaluation helpers | `evaluation_utilities.py` |
+| Fixed evaluation start states | `make_test_set.py` and `test_sets/` |
+
+## Installation
 
 ### Step 1: Clone the Repository
 
@@ -87,7 +82,7 @@ git clone https://github.com/DeepQZero/drifter.git
 cd drifter
 ```
 
-### Step 2: (Recommended) Create and Activate a Python Virtual Environment (Python 3.9+)
+### Step 2: (Recommended) Create and Activate a Python Virtual Environment (verified with Python 3.14.5)
 
 ```bash
 python -m venv venv
@@ -101,167 +96,186 @@ source venv/bin/activate
 
 ### Step 3: Install Dependencies
 
+Run this command from the repository folder, with the virtual environment active. It installs the exact package versions listed in `requirements.txt`:
+
 ```bash
-pip install stable-baselines3 gymnasium numpy scipy matplotlib
+pip install -r requirements.txt
 ```
 
----
+Alternatively, install the direct dependencies yourself. These are the same packages and versions as in `requirements.txt`:
+
+```bash
+pip install gymnasium==1.3.0 stable-baselines3==2.9.0 torch==2.13.0 numpy==2.5.1 scipy==1.18.0 matplotlib==3.11.1 tensorboard==2.21.0 onnx==1.22.0 onnxruntime==1.28.0
+```
+
+| Package | Version | Used for |
+|---|---|---|
+| `gymnasium` | 1.3.0 | Environment interface for the docking environments |
+| `stable-baselines3` | 2.9.0 | PPO training |
+| `torch` | 2.13.0 | Neural networks used by PPO |
+| `numpy` | 2.5.1 | Numerical computation |
+| `scipy` | 1.18.0 | Numerical integration of the spacecraft dynamics |
+| `matplotlib` | 3.11.1 | Trajectory and diagnostic plots |
+| `tensorboard` | 2.21.0 | Training logs |
+| `onnx`, `onnxruntime` | 1.22.0, 1.28.0 | Exporting and verifying trained policies in ONNX format (optional for training and evaluation) |
+
+### Step 4: Confirm the Installation
+
+```bash
+python -c "import drift_env, docking_env, evaluation_utilities; print('Installation OK')"
+```
+
+If this prints `Installation OK`, the environments and evaluation helpers import correctly.
 
 ## Training
 
-- Run `initial_trainer.py`; model id can be changed at the bottom of the script
-  - Checkpoints save automatically to `data/checkpoints/safe_PPO_<run>/`
-  - Training saves a checkpoint every 25,000 timesteps by default; can change the timesteps to adjust how often checkpoints are saved and tested
+The steps below train Drifter-Learn and save the checkpoints that are used for evaluation.
 
-- For direct docking (no drift), run `nodrift_initial_trainer.py` instead
-  - Can change `RUN_NAME` and `SAVE_ALL_EPOCHS` at the top of the file
-    - `SAVE_ALL_EPOCHS = False` keeps only the final passing checkpoint per stage
+### Drifter-Learn
 
-### nodrift_initial_trainer.py Configuration
+#### Step 1: Choose the Training Settings
 
-| Variable | Default | Description |
+Open `drift_initial_trainer.py` and review the constants at the top of the file. The main settings are:
+
+| Setting | Default | Description |
 |---|---|---|
-| `RUN_NAME` | `"nodrift_curriculum_PPO"` | Checkpoint folder name prefix |
-| `NUM_STAGES` | `6` | Number of curriculum stages to run |
-| `TIMESTEPS_PER_EPOCH` | `25_000` | Training steps per save-and-test cycle |
-| `TEST_EPISODES` | `1_000` | Episodes used to measure dock rate after each save |
-| `SAVE_ALL_EPOCHS` | `False` | Keep every epoch checkpoint, or only the passing one |
+| `RUN_NAME` | `"drift_curriculum_PPO"` | Checkpoint folder name prefix |
+| `NUM_STAGES` | 9 | Number of curriculum stages (0 to 8), from the closest start to the full range |
+| `SEED` | `None` | Training seed; if `None`, a random seed is chosen and printed so the run can be reproduced |
+| `BATCH_ID` | `None` | Optional tag that groups a run with others, recorded in `run_metadata.json` |
+| `N_ENVS` | 4 | Number of parallel environments, roughly the number of CPU cores used |
+| `TIMESTEPS_PER_EPOCH` | 25,000 | Training timesteps between each evaluation and checkpoint save |
+| `MAX_EPOCHS_PER_STAGE` | 10 | Epochs after which a stage that has not reached its pass threshold is abandoned |
+| `TEST_EPISODES` | 1,000 | Episodes used to measure the dock rate after each epoch |
 
----
+The environment flags in this file are the ablation options. All of them are off by default, which is the baseline configuration.
 
-## Checkpoint Naming
+#### Step 2: Run the Trainer
 
-**Drift curriculum:**
-```
-data/checkpoints/safe_PPO_{run}/safe_ppo_model_{stage}_{run}_{epoch}.zip
-```
-Example: `safe_PPO_8/safe_ppo_model_1_8_0.zip` is run 8, stage 1, epoch 0.
-
-**Direct docking curriculum:**
-```
-data/checkpoints/nodrift_curriculum_PPO_{run}/nodrift_ppo_model_{stage}_{run}_{epoch}.zip
+```bash
+python drift_initial_trainer.py
 ```
 
-**Single-run (train.py):**
-```
-data/checkpoints/drifter_PPO_{run}/drifter_ppo_{timesteps}_steps.zip
+The seed and batch tag can also be set from the command line:
+
+```bash
+python drift_initial_trainer.py --seed <seed> --batch-id <batch-id>
 ```
 
-The run number in each folder name increments automatically so old runs are never overwritten.
+- Each stage trains in epochs and is evaluated after every epoch; training advances to the next stage once the stage reaches its dock-rate target
+- Checkpoints are saved to `data/checkpoints/drift_curriculum_PPO_<run>/`, and the run number is assigned automatically as the lowest number not already in use
+- The seed, flags, and per-stage configuration are recorded in `run_metadata.json` in the run folder
 
----
+#### Checkpoint Naming
+
+```
+data/checkpoints/drift_curriculum_PPO_<run>/
+    drift_curriculum_ppo_model_<run>_<stage>_<epoch>.zip
+```
+
+Here `<run>` is the run number, `<stage>` is the curriculum stage, and `<epoch>` is the epoch within that stage. A single stage is not a complete docking policy, so the evaluation scripts chain the stages of one run.
 
 ## Evaluation
 
-- Individual models can be tested in `test.py`; make sure to change the curriculum number
-  - Update the model path and curriculum index at the top of the script
-  - Counts wins by checking if the final reward exceeds 9, which indicates a drift success
-  - Prints starting distance, win count, mean timesteps, and mean fuel per episode
+### Test Sets
 
-- Individual models can also be tested in `checkpoint_test.py` for more detailed output
-  - Set `CHECKPOINT` at the top of the file to point to your model
-  - Outputs win rate, failure breakdown, a 3-dimensional (3D) trajectory plot, and a JavaScript Object Notation (JSON) results file
+All paper results use the fixed start-state set `test_sets/standard_100_v2.json`. It contains 100 start states. In each one, the deputy starts 100 to 150 m from the chief with an initial speed between 0.10 and 0.50 m/s, measured as the magnitude of the relative velocity.
 
-- Combined models can be tested in `full_test.py`; place your models at the top
-  - Chains models from hardest to easiest stage within a single episode
-  - Only the final stage result counts as a win or loss
-  - `curriculum_evaluation.py` is a newer automated version of the same idea with configurable checkpoint resolution
+Each velocity component is sampled between -0.5 and 0.5 m/s. A start state is rejected if its speed exceeds the safe speed limit at that distance.
 
-### Checkpoint Formats for Testing
+Each file in `test_sets/` records its seed and sampling bounds, along with a fingerprint that is checked whenever the file is loaded. The fingerprint of `standard_100_v2` is `737dce4df767`.
 
-```python
-CHECKPOINT = "latest"                         # newest checkpoint in the most recent run folder
-CHECKPOINT = "run:safe_PPO_8"                 # newest checkpoint inside a specific run folder
-CHECKPOINT = "pattern:safe_ppo_model_*_8.zip" # glob pattern inside the checkpoint root
-CHECKPOINT = r"data\checkpoints\safe_PPO_8\safe_ppo_model_9_8_0.zip"  # exact path
+The seed and bounds of this set are the defaults of `make_test_set.py`. It can therefore be regenerated under a new name and checked against the fingerprint with:
+
+```bash
+python make_test_set.py --name <new-name> --expect-fingerprint 737dce4df767
 ```
 
-### Evaluation Output Files
+### Drifter-Learn
 
-After running `checkpoint_test.py` or `curriculum_evaluation.py`, results are saved automatically:
+#### Step 1: Choose the Checkpoints
 
-- `saved_figures/` - 3D trajectory plots as Portable Network Graphics (PNG) files, one per evaluation run
-- `saved_results/` - JSON summary files containing win rate, fuel statistics, and per-episode results
+Open `drift_full_test.py` and set `CHECKPOINT` near the top of the file. The supported forms are:
 
----
+```python
+# Newest checkpoints in the most recent run folder
+CHECKPOINT = "latest"
 
-## Troubleshooting
+# Checkpoints in a specific run folder
+CHECKPOINT = "run:drift_curriculum_PPO_<run>"
 
-- Action isn't set to deterministic for testing
-  - Pass `deterministic=True` to `model.predict()` during evaluation; without it the agent samples randomly instead of using its best learned action
+# Glob pattern inside the checkpoint folder
+CHECKPOINT = "pattern:drift_curriculum_ppo_model_<run>_*.zip"
+```
 
-- Agent is docking and not drifting to dock (rewards are smaller for docking than drifting)
-  - The drift reward is +10 and the direct dock reward is +1, so a well-trained agent should prefer to drift when a valid drift trajectory is available
-  - If the agent never drifts, `max_lookahead_len` may be too short to detect a valid drift path from the current position; try increasing it
+To select exact checkpoint files, set `USE_MANUAL_CHECKPOINTS = True` and list the paths in `MANUAL_MODEL_PATHS`, from hardest to easiest stage.
 
-- Gymnasium emits float32 warnings about Box observation bounds
-  - These are harmless and can be ignored; they are caused by float64 bounds in the observation space definition and do not affect training or evaluation results
+#### Step 2: Choose the Evaluation Settings
 
----
+| Setting | Default | Description |
+|---|---|---|
+| `NUM_EPISODES` | 30 | Number of episodes to run |
+| `TEST_SET` | `test_sets/standard_100_v2.json` | Fixed start states, so every run faces identical episodes |
+| `SEED` | `None` | Episode seed; if `None`, a random seed is chosen and printed |
+| `USE_SAFE_ACTION` | `False` | Safe-action ablation: replace the model action with a one-step lookahead safety check |
+| `USE_ACTION_NOISE` | `False` | Action-noise ablation: multiply every action by random noise in [0.95, 1.05] |
+| `SHOW_PLOTS` | `False` | Open a window for each plot; if `False`, plots are saved to `saved_figures/` |
 
-## Ideas
+#### Step 3: Run the Evaluation
 
-- Reduce entropy coefficient
-  - A lower entropy coefficient later in training would likely encourage more deterministic, committed behavior; this could probably be implemented as a scheduled parameter that decreases over the course of training
+```bash
+python drift_full_test.py
+```
 
-- Make Partially Observable Markov Decision Process (POMDP) and remove time step
-  - Removing the timestep counter from the state vector would make the problem partially observable, which is probably more realistic for onboard deployment; not sure whether this would help or hurt sample efficiency
+- The script starts with the hardest-stage model and switches to the next easier stage model each time the current one docks the spacecraft
+- Only the final stage determines whether an episode is a win or a loss
+- A per-episode results file is written to `saved_data/`, and trajectory plots are written to `saved_figures/`
 
-- Curricula could be more focused at start states (e.g. near 2.5, 10, 50, 150)
-  - Sampling start positions near the stage transition distances rather than uniformly across the full range may help the agent generalize across stages more reliably; this would likely require some per-stage tuning
+### Other Evaluation Scripts
 
-- Export to Open Neural Network Exchange (ONNX) or TorchScript for deployment
-  - Frozen inference models could probably be exported for use on onboard hardware; this has not been tested and may require changes to the environment wrapper
+- `checkpoint_test.py` evaluates one checkpoint
+- `curriculum_evaluation.py` evaluates a curriculum chain with a fixed seed
+- `drift_vs_drift_test.py` and `drift_vs_nodrift_test.py` compare two agents on paired episodes
 
----
+Each script is configured through constants at the top of the file.
 
-## TODO
+Checkpoints, training data, and evaluation outputs are written to `data/`, `saved_data/`, `saved_results/`, and `saved_figures/`. These folders are not version controlled.
 
-- Do `env.unwrapped`
-  - Replace direct `env.env` attribute access with `env.unwrapped` to follow the Gymnasium application programming interface (API) properly
+## Command-Line Options
 
----
+`drift_full_test.py` takes no command-line flags. It is configured through the constants at the top of the file, as described above.
 
-## Definitions
+The following scripts accept flags:
 
-**API (Application Programming Interface):**
-A set of rules and conventions that software components use to communicate with each other. In this project, the Gymnasium API defines how environments expose observations, actions, and rewards to training scripts.
+| Script | Flag | Description |
+|---|---|---|
+| `drift_initial_trainer.py` | `--seed`, `-s` | Training seed, for reproducibility |
+| | `--batch-id` | Tag that groups this run with others, recorded in `run_metadata.json` |
+| `make_test_set.py` | `--num-states` | Number of start states to generate |
+| | `--name` | Name of the set, which is also the file name in `test_sets/` |
+| | `--seed` | Seed used to generate the start states |
+| | `--max-vel-bound` | Limit on each velocity component of a start state, in meters per second, for the default distribution |
+| | `--distribution` | Sampling distribution: `uniform_cube` (default), `space_controls` (sampling from Space Controls (2024)), or `saferl` (sampling from SafeRL (2022)) |
+| | `--expect-fingerprint` | Stop without writing the file if the generated set has a different fingerprint |
+| | `--overwrite` | Allow replacing an existing set with the same name; without it, the script refuses to overwrite |
+| `checkpoint_test.py` | `--mode` | Agent mode: `drift`, `nodrift`, or `auto` (detect from the checkpoint file name); overrides `AGENT_MODE` in the file |
+| | `--no-fix-unsafe` | Disable the patch that prevents premature unsafe terminations during evaluation |
+| `rename_checkpoints.py` | `--apply` | Rename the files; without it, the script only reports which files it would rename |
 
-**Chief/Deputy:**
-Terms used to describe the primary (chief) and secondary (deputy) spacecraft in relative motion. The deputy maneuvers relative to the stationary chief.
+The defaults for each script are constants at the top of its file. Example usage:
 
-**CWH (Clohessy-Wiltshire-Hill) Equations:**
-A set of linearized differential equations describing the relative motion of one spacecraft (the deputy) with respect to another (the chief) in a circular orbit. Used throughout this project to propagate the deputy's position and velocity each timestep.
+```bash
+python make_test_set.py --num-states <number> --name <name> --seed <seed>
+python checkpoint_test.py --mode <drift|nodrift|auto>
+python rename_checkpoints.py --apply
+```
 
-**Curriculum Learning:**
-A training method where an agent learns tasks in order from easy to hard. In this project, the agent first trains at close range with a large docking target, then progressively trains at longer ranges with tighter docking requirements.
+## Acknowledgements
 
-**Delta-V (dV):**
-A measure of the total change in velocity a spacecraft uses for maneuvering. Used here as a proxy for fuel consumption.
+The first four authors completed this work as part of the 2025 Air Force Research Laboratory (AFRL) Scholars Program, funded by the Universities Space Research Association (USRA). Loren Anderson completed some of the experimentation for this work while employed by Huntington Ingalls Industries (HII); the current version of this work is not affiliated with HII in any form.
 
-**Drifting:**
-A period where the spacecraft applies zero thrust and coasts along its natural orbital trajectory. The key point of this project is that drifting can sometimes complete a docking scenario with less fuel than actively thrusting.
+We thank Steven Tran, who interned in the 2025 AFRL Scholars Program, for helpful discussions.
 
-**JSON (JavaScript Object Notation):**
-A lightweight text format for storing and exchanging data. Used in this project to save evaluation results such as win rates, fuel statistics, and per-episode outcomes.
+The authors wish to acknowledge the AFRL Space Vehicles Directorate for their support of this work. *Space Superiority Modeling, Simulation, and Analyses (MS&A), and Applications Solutions (DTIC FA807525F0046).*
 
-**Lookahead:**
-A model-based check performed each timestep to determine whether drifting from the current state would lead to a successful dock within a fixed number of steps. If the lookahead returns true, the agent stops thrusting and drifts.
-
-**ONNX (Open Neural Network Exchange):**
-An open format for representing machine learning models, designed to make it easier to move models between different software frameworks and hardware platforms.
-
-**POMDP (Partially Observable Markov Decision Process):**
-A framework for sequential decision-making where the agent cannot directly observe the full environment state. Removing the timestep counter from the state vector would make this problem a POMDP.
-
-**PPO (Proximal Policy Optimization):**
-A popular policy gradient algorithm used to train the agents in this project. PPO updates the agent's policy using small, controlled steps to keep training stable. It is widely used in robotics and simulated environments because it is reliable and relatively simple to tune.
-
-**RL (Reinforcement Learning):**
-A machine learning approach where an agent learns to make decisions by interacting with an environment and receiving rewards or penalties. Currently, all agents in this project are trained using reinforcement learning.
-
-**RPO (Rendezvous and Proximity Operations):**
-A set of spaceflight maneuvers where one spacecraft approaches and potentially docks with another object in orbit. This project focuses on the final docking phase of rendezvous and proximity operations (RPO).
-
-**State Vector:**
-The numerical representation of the environment passed to the agent at each timestep. In this project the state is a 7-element vector: relative position (x, y, z), relative velocity (vx, vy, vz), and a timestep counter.
+DISCLAIMER: The views expressed are those of the authors and do not reflect the official guidance or position of the United States Government, the Department of Defense or the United States Air Force.
